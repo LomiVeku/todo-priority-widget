@@ -1,0 +1,42 @@
+# ---- 构建产物 ----
+**/dist/
+**/*.exe
+**/*.syso
+installer/payload/
+installer/makeportable/portable-staging/
+app-go/dev*.exe
+
+# ---- 工具链与缓存（体积大，不入库）----
+toolchain/go/
+toolchain/gopath/
+toolchain/gocache/
+toolchain/_download/
+toolchain/_probe/
+toolchain/_relay/
+toolchain/tools/__pycache__/
+
+# ---- 早期 Electron 基线（只读参照）----
+app/
+
+# ---- 测试产物与备份 ----
+_verify/
+backup/
+project-test/
+ui-test/
+
+# ---- 内部记录（不进公开仓库）----
+output/
+ai-bridge/
+.workbuddy/
+
+# ---- 截图与探测语料 ----
+docs/screenshots-*/
+docs/probe/
+
+# ---- 临时 ----
+*.zip
+*.log
+*.tmp
+Thumbs.db
+desktop.ini
+.DS_Store

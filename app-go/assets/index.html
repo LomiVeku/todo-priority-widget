@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'self' file:; style-src 'self' 'unsafe-inline' file:; img-src 'self' file: data: blob:; base-uri 'none'; form-action 'none'; object-src 'none'" />
+  <title>待办事项优先级提示窗</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="root" class="panel" data-hit="1">
+
+    <!-- ============ 标题栏（可拖动） ============ -->
+    <header id="titlebar" class="titlebar" data-hit="1">
+      <div class="brand">
+        <span class="brand-mark"></span>
+        <span class="brand-text">待办事项</span>
+        <span id="count" class="count">0</span>
+        <span id="version" class="version">v1.2.0</span>
+      </div>
+      <div class="tools">
+        <button id="btn-top" class="icon-btn" title="置顶（点击切换）" aria-label="置顶（点击切换）">
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+            <path d="M8 1.6 3.6 6h2.6v3.6h3.6V6h2.6z"/>
+            <rect x="2.8" y="11.6" width="10.4" height="1.5" rx="0.75"/>
+          </svg>
+        </button>
+        <button id="btn-dock" class="icon-btn" title="边缘吸附缩入（点击切换）" aria-label="边缘吸附缩入（点击切换）">
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+            <path d="M2 2h5v12H2z"/><path d="M9 2h5v12H9z" opacity="0.45"/>
+          </svg>
+        </button>
+        <button id="btn-min" class="icon-btn" title="最小化到托盘" aria-label="最小化到托盘">
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+            <rect x="3" y="7.3" width="10" height="1.4" rx="0.7"/>
+          </svg>
+        </button>
+        <button id="btn-close" class="icon-btn danger" title="退出" aria-label="退出">
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+            <path d="M3.6 3.6 12.4 12.4M12.4 3.6 3.6 12.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" fill="none"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- ============ 输入区 ============ -->
+    <section class="composer" data-hit="1">
+      <div class="input-row">
+        <input id="input-text" type="text" autocomplete="off"
+               placeholder="说一句，例如：明天下午3点前交周报 紧急" data-hit="1" />
+        <button id="btn-add" class="primary-btn" title="生成待办" data-hit="1">生成</button>
+      </div>
+      <div class="input-row second">
+        <label class="mini-field">
+          <span class="mini-label">优先级</span>
+          <select id="input-priority" data-hit="1">
+            <option value="urgent">紧急</option>
+            <option value="important">重要</option>
+            <option value="normal" selected>常规</option>
+            <option value="minor">次要</option>
+            <option value="shelved">搁置</option>
+          </select>
+        </label>
+        <label class="mini-field grow">
+          <span class="mini-label">完成时限</span>
+          <input id="input-deadline" type="datetime-local" data-hit="1" />
+        </label>
+        <button id="btn-pick-img" class="ghost-btn" title="选择图片加入" data-hit="1">附图</button>
+      </div>
+      <div id="parse-preview" class="parse-preview"></div>
+    </section>
+
+    <!-- ============ 列表 ============ -->
+    <main id="list-wrap" class="list-wrap">
+      <div id="list" class="list"></div>
+      <div id="empty" class="empty">
+        <svg class="empty-icon" viewBox="0 0 24 24" width="38" height="38" aria-hidden="true">
+          <rect x="4" y="3.2" width="16" height="17.6" rx="3" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          <path d="M8.2 8.6h7.6M8.2 12.2h7.6M8.2 15.8h4.6" stroke="currentColor" stroke-width="1.4"
+                stroke-linecap="round" fill="none"/>
+        </svg>
+        <div class="empty-title">还没有待办</div>
+        <div class="empty-sub">在上方输入一句话，或把图片直接拖进来</div>
+      </div>
+    </main>
+
+    <!-- ============ 底栏 ============ -->
+    <footer class="footer" data-hit="1">
+      <label class="chk" data-hit="1">
+        <input id="chk-show-done" type="checkbox" data-hit="1" /><span>显示已完成</span>
+      </label>
+      <label class="chk" data-hit="1" title="已过完成时限的待办高亮橙圈并置顶；窗口缩入时自动弹出">
+        <input id="chk-remind" type="checkbox" data-hit="1" /><span>到期提醒</span>
+      </label>
+      <div class="footer-right">
+        <span id="stat" class="stat"></span>
+        <button id="btn-data-dir" class="link-btn" title="打开数据目录" data-hit="1">数据目录</button>
+      </div>
+    </footer>
+
+    <!-- 缩入后的把手 -->
+    <div id="dock-handle" class="dock-handle" data-hit="1"><span class="grip"></span></div>
+  </div>
+
+  <!-- ============ 拖放遮罩 ============ -->
+  <div id="drop-overlay" class="drop-overlay">
+    <div class="drop-inner">
+      <svg viewBox="0 0 24 24" width="34" height="34" aria-hidden="true">
+        <path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M4 15v3.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V15" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round"/>
+      </svg>
+      <div class="drop-text">松手即加入图片</div>
+      <div class="drop-sub">拖到某条待办上＝附给它；拖到空白处＝新建一条</div>
+    </div>
+  </div>
+
+  <!-- ============ 二次确认弹窗（完成 / 删除共用，标题与按钮文案运行时切换） ============ -->
+  <div id="modal-confirm" class="modal">
+    <div class="modal-card small">
+      <div id="confirm-title" class="modal-title">确认完成？</div>
+      <div id="confirm-text" class="modal-body"></div>
+      <div class="modal-actions">
+        <button id="btn-confirm-cancel" class="ghost-btn">取消</button>
+        <button id="btn-confirm-ok" class="primary-btn">确认完成</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 详情弹窗 ============ -->
+  <div id="modal-detail" class="modal">
+    <div class="modal-card">
+      <div class="modal-title">待办详情</div>
+      <div class="modal-scroll">
+        <label class="field">
+          <span class="field-label">待办内容</span>
+          <textarea id="d-content" rows="3" data-hit="1"></textarea>
+        </label>
+        <div class="field-row">
+          <label class="field">
+            <span class="field-label">优先级</span>
+            <select id="d-priority" data-hit="1">
+              <option value="urgent">紧急</option>
+              <option value="important">重要</option>
+              <option value="normal">常规</option>
+              <option value="minor">次要</option>
+              <option value="shelved">搁置</option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="field-label">完成时限</span>
+            <input id="d-deadline" type="datetime-local" data-hit="1" />
+          </label>
+        </div>
+        <label class="field">
+          <span class="field-label">备注</span>
+          <textarea id="d-note" rows="2" data-hit="1"></textarea>
+        </label>
+        <div class="field">
+          <span class="field-label">图片（点击查看原图，右键可移除）</span>
+          <div id="d-images" class="d-images"></div>
+          <button id="d-add-img" class="ghost-btn mt6" data-hit="1">添加图片</button>
+        </div>
+        <div id="d-meta" class="d-meta"></div>
+      </div>
+      <div class="modal-actions">
+        <button id="btn-d-delete" class="danger-btn">删除</button>
+        <div class="spacer"></div>
+        <button id="btn-d-cancel" class="ghost-btn">取消</button>
+        <button id="btn-d-save" class="primary-btn">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 原图查看 ============ -->
+  <div id="lightbox" class="lightbox">
+    <div class="lightbox-bar">
+      <span id="lightbox-name" class="lightbox-name"></span>
+      <span id="lightbox-size" class="lightbox-size"></span>
+      <button id="btn-lightbox-fit" class="ghost-btn" data-hit="1">适应窗口</button>
+      <button id="btn-lightbox-close" class="ghost-btn" data-hit="1">关闭 (Esc)</button>
+    </div>
+    <div class="lightbox-stage" id="lightbox-stage">
+      <img id="lightbox-img" alt="原图" />
+    </div>
+  </div>
+
+  <!-- ============ 三按钮确认弹窗（就地编辑专用：是 / 否 / 撤回） ============ -->
+  <div id="modal-edit-confirm" class="modal">
+    <div class="modal-card small">
+      <div id="edit-confirm-title" class="modal-title">确认修改？</div>
+      <div id="edit-confirm-text" class="modal-body"></div>
+      <div class="modal-actions edit-actions">
+        <button id="btn-edit-yes" class="primary-btn" title="保存修改（Enter）">
+          <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+            <path d="M2.6 8.4 6 11.8 13.4 4.4" fill="none" stroke="currentColor"
+                  stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg><span>是</span>
+        </button>
+        <button id="btn-edit-no" class="ghost-btn" title="回到编辑（不保存）">
+          <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+            <path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor"
+                  stroke-width="2" stroke-linecap="round"/>
+          </svg><span>否</span>
+        </button>
+        <button id="btn-edit-undo" class="ghost-btn" title="还原并退出编辑（Esc）">
+          <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+            <path d="M6.4 3.2 3 6.6l3.4 3.4" fill="none" stroke="currentColor"
+                  stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M3.4 6.6h6a3.4 3.4 0 0 1 0 6.8H7.6" fill="none" stroke="currentColor"
+                  stroke-width="1.8" stroke-linecap="round"/>
+          </svg><span>撤回</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 优先级右键菜单（自绘，运行时动态填充五档项） ============ -->
+  <div id="ctx-menu" class="ctx-menu" role="menu" hidden></div>
+
+  <input id="file-input" type="file" accept="image/*" multiple hidden />
+  <input id="file-input-detail" type="file" accept="image/*" multiple hidden />
+
+  <div id="toast" class="toast"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
