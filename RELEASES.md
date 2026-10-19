@@ -17,8 +17,10 @@
 
 | 包 | 适用 | 说明 |
 |---|---|---|
-| `待办事项优先级提示窗-安装包-1.0beta.exe` | 常规使用 | 安装到系统，创建开始菜单与桌面快捷方式；卸载时清理程序与快捷方式，用户数据默认保留 |
-| `待办事项优先级提示窗-便携版-1.0beta.zip` | 免安装 / U 盘 | 解压即用，数据存程序目录 `data/`，不写注册表 |
+| `TodoPriorityWidget-1.0beta-setup.exe` | 常规使用 | 安装到系统，创建开始菜单与桌面快捷方式；卸载时清理程序与快捷方式，用户数据默认保留 |
+| `TodoPriorityWidget-1.0beta-portable.zip` | 免安装 / U 盘 | 解压即用，数据存程序目录 `data/`，不写注册表 |
+
+> 附件用 ASCII 名分发，避免下载端与浏览器对中文文件名的编码差异；**安装后的程序名、开始菜单项、便携版解压目录均为中文原名**「待办事项优先级提示窗」。
 
 **系统要求**：Windows 10 / 11 x64；需要 WebView2 运行时（Win11 自带，Win10 缺失时安装包会引导安装）。
 
@@ -38,13 +40,13 @@
 
 | 文件 | SHA256 |
 |---|---|
-| `待办事项优先级提示窗-安装包-1.0beta.exe`（9,871,360 B） | `932B6F236B1E02DD0A758316EA4965B35448C64132D6729D4843B0CCD075F00F` |
-| `待办事项优先级提示窗-便携版-1.0beta.zip`（2,157,103 B） | `BF5C5BCB24433C02D15216A151E34B712BD91BCF93DE5DEDBFCDEC3F493A51F7` |
+| `TodoPriorityWidget-1.0beta-setup.exe`（9,871,360 B） | `932B6F236B1E02DD0A758316EA4965B35448C64132D6729D4843B0CCD075F00F` |
+| `TodoPriorityWidget-1.0beta-portable.zip`（2,157,103 B） | `BF5C5BCB24433C02D15216A151E34B712BD91BCF93DE5DEDBFCDEC3F493A51F7` |
 
 校验方法（Windows）：
 
 ```powershell
-Get-FileHash .\待办事项优先级提示窗-安装包-1.0beta.exe -Algorithm SHA256
+Get-FileHash .\TodoPriorityWidget-1.0beta-setup.exe -Algorithm SHA256
 ```
 
 ---
