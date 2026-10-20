@@ -29,6 +29,22 @@ output/
 ai-bridge/
 .workbuddy/
 
+# ---- 内部文档与协作档案（2026-10-20 补，起因见下）----
+# 事故：在 output/_publish/ 下 cd .. 后执行 git add -A，被本仓库 .git 接管，
+# 把 AGENTS.md、docs/、toolchain/tools/ 等 45 个内部文件提交并推送到公开仓库。
+# 教训：本仓库**禁止** git add -A / git commit -a，一律显式点名文件。
+AGENTS.md
+docs/
+# 项目根的三份内部档案（协作规则 / 版本登记 / 测试 SOP）
+测试流程SOP与填坑备忘录.md
+版本登记-内部.md
+项目记忆-协作规则.md
+toolchain/relay/relay.json
+toolchain/relay/relay.json.bak-*
+# 工具脚本默认不公开，仅放行交付体检脚本（它是给外部复核用的）
+toolchain/tools/*
+!toolchain/tools/release_check.py
+
 # ---- 截图与探测语料 ----
 docs/screenshots-*/
 docs/probe/
