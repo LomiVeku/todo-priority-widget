@@ -57,12 +57,17 @@ var (
 	pipeStopOnce sync.Once
 	pipeListH    windows.Handle // 监听实例句柄
 	pipeConnH    windows.Handle // 当前连接句柄（0 = 无客户端）
+	pipeThreadH  windows.Handle // 监听协程线程真句柄（DuplicateHandle 转换；CancelSynchronousIo 用，T8）
 	pipeOutbox   chan []byte    // 有界写队列（§5.2）
 	pipeSnapshot []byte         // 最近一次序列化的 state（B2 去重）
 	pipeTodos    []interface{}  // 最近一次的 todos（due tick 数据源）
 	pipeNotified map[string]int64
 	pipeSeeded   bool // B6 种子是否已处理
 )
+
+// T8（P0 退出卡死）：CancelSynchronousIo——取消线程上的同步 I/O（阻塞式 ConnectNamedPipe）
+var pipeCancelSIO = windows.NewLazySystemDLL("kernel32.dll").NewProc("CancelSynchronousIo")
+var pipeGetCurThread = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetCurrentThread")
 
 // ---- 纯函数（selftest 与单测直接调用，不依赖 GUI） ----
 
@@ -233,6 +238,12 @@ func pipeStart() {
 	if selftestMode || pipeStarted || pipeStopped {
 		return
 	}
+	pipeStartInternal()
+}
+
+// pipeStartInternal：实际启动（与挡板分离——V9/V10 自检测试入口经 pipeResetForTest 后调用）。
+// tick 协程在 selftest 中无 todos 数据源 → 不推任何数据（对真实环境零干扰）。
+func pipeStartInternal() {
 	pipeStarted = true
 	pipeNotified = map[string]int64{}
 	pipeOutbox = make(chan []byte, pipeOutboxCap)
@@ -241,20 +252,41 @@ func pipeStart() {
 	go pipeTickLoop()
 }
 
-// pipeStop：停止服务（requestClose 真退出路径调用）
+// pipeResetForTest：V9/V10 连跑间的状态复位（自检专用；真实进程无重开场景）。
+// sync.Once 不可重置 → 整体替换；pipeDoneCh 换新（已 close 的不能再收）。
+func pipeResetForTest() {
+	pipeMu.Lock()
+	pipeStarted = false
+	pipeStopped = false
+	pipeThreadH = 0
+	pipeListH = 0
+	pipeConnH = 0
+	pipeMu.Unlock()
+	pipeStopOnce = sync.Once{}
+	pipeDoneCh = make(chan struct{})
+	pipeOutbox = nil
+}
+
+// pipeStop：停止服务（requestClose 真退出路径调用）。
+// T8 修（P0 退出卡死）：旧版在锁外 CloseHandle(pipeListH)——当监听协程正阻塞在同步
+// ConnectNamedPipe(h, nil)（无客户端时永不返回）时，CloseHandle 要等该同步 I/O 结束
+// → UI 线程与 pipe 协程互锁、进程永不退出（_verify\quit-hang-20261022 3/3 复现）。
+// 现版：①CancelSynchronousIo(pipeThreadH) 先行——把协程线程上的同步 I/O（ConnectNamedPipe，
+// 以及 serve 可能卡住的 WriteFile）一并打 ERROR_OPERATION_ABORTED；
+// ②**停止方不再 CloseHandle 任何句柄**——listen 协程在 ABORTED 返回路径自关、
+// serve 在退出 defer 自关（conn）——每句柄单一关闭方，消除双重 CloseHandle
+//（停止方关闭后句柄值可能已被内核复用，双关属未定义行为；旧代码双关路径从未真实
+// 走过是因为 stop 时协程先卡死了）。
 func pipeStop() {
 	pipeStopOnce.Do(func() {
 		pipeStopped = true
 		close(pipeDoneCh)
 		pipeMu.Lock()
-		lh, ch := pipeListH, pipeConnH
-		pipeListH, pipeConnH = 0, 0
+		th := pipeThreadH
+		pipeListH, pipeConnH, pipeThreadH = 0, 0, 0
 		pipeMu.Unlock()
-		if lh != 0 {
-			windows.CloseHandle(lh)
-		}
-		if ch != 0 {
-			windows.CloseHandle(ch)
+		if th != 0 {
+			pipeCancelSIO.Call(uintptr(th))
 		}
 	})
 }
@@ -314,6 +346,10 @@ func bytesEqual(a, b []byte) bool {
 
 // pipeListenLoop：建管道 → 等连接 → serve → 循环；创建失败 30s 重试不退出进程。
 func pipeListenLoop() {
+	// T8：取自身线程真句柄（GetCurrentThread 返回伪句柄，需 DuplicateHandle 转真才能被
+	// pipeStop 所在线程用于 CancelSynchronousIo）。写入与 pipeListH 同一临界区——
+	// happens-before 保证：pipeStop 拿到锁时，要么尚无句柄（无需取消），要么两者齐备。
+	myThreadH := pipeDupCurrentThread()
 	pipeFirstCreateDone := false // 首次创建带 FIRST_PIPE_INSTANCE（防抢注）；重建时不带
 	                              // ——修复"上一实例刚关、内核清理未完时 0ms 重连失败"盲区（T6 终审发现）
 	for !pipeStopped {
@@ -340,6 +376,7 @@ func pipeListenLoop() {
 		pipeFirstCreateDone = true
 		pipeMu.Lock()
 		pipeListH = h
+		pipeThreadH = myThreadH
 		pipeMu.Unlock()
 		appLogf("pipe: listening %s", pipeName)
 
@@ -359,6 +396,21 @@ func pipeListenLoop() {
 		pipeServeConn(h) // 阻塞直到断开 / 停止
 		appLogf("pipe: 桌宠连接结束")
 	}
+}
+
+// pipeDupCurrentThread：把当前线程伪句柄转成可跨线程使用的真句柄；失败返回 0
+//（pipeStop 将跳过取消——此时协程尚未触达 ConnectNamedPipe，或环境异常，行为退回 T6 前状态）。
+func pipeDupCurrentThread() windows.Handle {
+	pseudo, _, _ := pipeGetCurThread.Call()
+	var out windows.Handle
+	if err := windows.DuplicateHandle(
+		windows.CurrentProcess(), windows.Handle(pseudo), windows.CurrentProcess(), &out,
+		0, false, windows.DUPLICATE_SAME_ACCESS,
+	); err != nil {
+		appLogf("pipe: DuplicateHandle 失败 %v（CancelSynchronousIo 将不可用，stop 可能退回互锁）", err)
+		return 0
+	}
+	return out
 }
 
 func pipeSleepRetry() {

@@ -4,6 +4,7 @@
 **/*.syso
 installer/payload/
 installer/makeportable/portable-staging/
+installer/portable-staging/
 app-go/dev*.exe
 
 # ---- 工具链与缓存（体积大，不入库）----

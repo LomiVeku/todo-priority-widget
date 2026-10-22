@@ -4,7 +4,7 @@
 //
 // 职责：
 //   1. 从既有产物组装 staging（不重新构建任何东西）：
-//        portable-staging\待办事项优先级提示窗-便携版-1.0beta\
+//        portable-staging\待办事项优先级提示窗-便携版-1.1beta\
 //          待办事项优先级提示窗.exe  ← 复制 beta 产物（字节不变，改名）
 //          assets\…                  ← 复制 app-go assets 全量
 //          data\说明.txt             ← UTF-8 BOM 占位（便携模式开关）
@@ -33,17 +33,17 @@ import (
 
 var (
 	bom        = []byte{0xEF, 0xBB, 0xBF}
-	betaName   = "待办事项优先级提示窗-便携版-1.0beta"
+	betaName   = "待办事项优先级提示窗-便携版-1.1beta"
 	mainExeName = "待办事项优先级提示窗.exe"
 	stagingDir = "portable-staging"
 )
 
 const usageTxt = `==========================================
- 待办事项优先级提示窗 · 便携版 1.0beta
+ 待办事项优先级提示窗 · 便携版 1.1beta
 ==========================================
 
 【使用】解压即用，无需安装
-  1. 把「待办事项优先级提示窗-便携版-1.0beta」整个文件夹解压到任意位置
+  1. 把「待办事项优先级提示窗-便携版-1.1beta」整个文件夹解压到任意位置
      （建议避开 Program Files 等可能有写入限制的系统位置）
   2. 双击「待办事项优先级提示窗.exe」即可运行
 
@@ -59,7 +59,7 @@ const usageTxt = `==========================================
   · 系统要求：Windows 10 / 11（64 位）；界面基于系统 WebView2 运行时
     （Windows 11 及较新的 Windows 10 已内置）
 
-—— 待办事项优先级提示窗 1.0beta · 便携版
+—— 待办事项优先级提示窗 1.1beta · 便携版
 `
 
 const dataReadmeTxt = `本目录存放你的待办数据（todos.json 与图片）。
@@ -73,9 +73,9 @@ func fatal(err error) {
 }
 
 func main() {
-	app := flag.String("app", `..\app-go\dist\build-beta-out.exe`, "1.0beta 主程序产物路径（字节不变改名）")
+	app := flag.String("app", `..\app-go\dist\build-beta-out.exe`, "1.1beta 主程序产物路径（字节不变改名）")
 	assets := flag.String("assets", `..\app-go\dist\assets`, "assets 全量目录")
-	out := flag.String("out", `dist\待办事项优先级提示窗-便携版-1.0beta.zip`, "输出 zip 路径")
+	out := flag.String("out", `dist\待办事项优先级提示窗-便携版-1.1beta.zip`, "输出 zip 路径")
 	flag.Parse()
 
 	appBytes, err := os.ReadFile(*app)

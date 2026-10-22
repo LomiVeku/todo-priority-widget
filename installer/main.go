@@ -1,6 +1,6 @@
 ﻿//go:build windows
 
-// 待办事项优先级提示窗 · 安装器（对外 1.0beta）
+// 待办事项优先级提示窗 · 安装器（对外 1.1beta）
 //
 // 交付形态：单文件安装器 exe（windowsgui、零控制台、零运行时依赖）。
 // 载荷（主程序 exe + assets 全量 + uninstall.exe）由 go:embed 打包进本体。
@@ -40,7 +40,7 @@ var assetsFS embed.FS
 
 var (
 	appDisplayName = `待办事项优先级提示窗`
-	appVersionStr  = "1.0beta"
+	appVersionStr  = "1.1beta"
 	uninstallRegKey = `Software\Microsoft\Windows\CurrentVersion\Uninstall\TodoPriorityWidget`
 )
 

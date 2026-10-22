@@ -27,6 +27,19 @@ type stCheck struct {
 	Detail interface{} `json:"detail,omitempty"`
 }
 
+// T9：自检专用 proc（顶层窗口枚举链——GetTopWindow+GetWindow 链遍历，不用 EnumWindows 回调，
+// 零 NewCallback 泄漏/累积问题；仅自检使用）
+var (
+	selftestGetTopWindow = windows.NewLazySystemDLL("user32.dll").NewProc("GetTopWindow")
+	selftestGetWindow    = windows.NewLazySystemDLL("user32.dll").NewProc("GetWindow")
+	// T10：托盘菜单勾选态断言用
+	selftestGetMenuState = windows.NewLazySystemDLL("user32.dll").NewProc("GetMenuState")
+)
+
+const selftestGwHwndNext = 2 // GW_HWNDNEXT
+const selftestMfByPosition = 0x00000400
+const selftestMfChecked = 0x00000008 // MF_CHECKED
+
 type stReport struct {
 	StartedAt string           `json:"startedAt"`
 	Mode      string           `json:"mode"`
@@ -135,8 +148,8 @@ func runSelftest() {
 		// 4b 版本徽章
 		if cards, ok := diag["cards"].([]any); ok && len(cards) > 0 {
 			check("version-badge", diag["versionBadge"] == "v"+appVersion, diag["versionBadge"])
-			// 1.2.1 批 D：版本号防回退（内部 1.2.1 / 对外打包 1.0beta 皆合法）
-			check("version-string", appVersion == "1.3.0" || appVersion == "1.0beta", appVersion)
+			// 1.2.1 批 D：版本号防回退。允许集为"仍在流通的版本"枚举；升版本时随动追加，非放松阈值（T10 随动 1.4.0；T6.3 改绑单一事实源治本）。
+			check("version-string", appVersion == "1.4.0" || appVersion == "1.3.2" || appVersion == "1.3.1" || appVersion == "1.3.0" || appVersion == "1.1beta" || appVersion == "1.0beta", appVersion)
 			// 4c 五档配色（双层底 + 优先级叠加 + 强调条）
 		// 第五批（用户 2026-10-13 授权调整透明度，非降阈值）：卡片底**按档分层**——
 		// 浅字三档 0.65/0.75/0.78（可读性垫暗），深字两档 0.45（对比度由 overlay 主导，更透赚质感）
@@ -707,14 +720,16 @@ func runSelftest() {
 		check("viewer-centered", math.Abs(viewer.panX-(float64(viewer.clientW)-float64(viewer.imgW)*viewer.zoom)/2) < 0.6 &&
 			math.Abs(viewer.panY-((float64(viewer.clientH)-viewerStatusH*float64(dpiScale))-float64(viewer.imgH)*viewer.zoom)/2) < 0.6,
 			fmt.Sprintf("pan=(%.1f,%.1f)（fit 后应居中）", viewer.panX, viewer.panY))
-		/* 第四批 1/2：状态条布局与命中（layoutStatus/HitZoom 纯逻辑直测，不解释原因无风险） */
-		z, h, hv := layoutStatus(1200, 600, 56, 300) // 常规空间（H 视irtual区仅构图，状态 top 由 clientH 决定）
-		check("status-layout-normal", z.right == 1200-8 && z.right-z.left >= 56 && hv &&
-			h.right <= z.left-12,
-			fmt.Sprintf("zoom锚右=%v 宽=%v 提示=%v（常规宽度提示可见且不与 zoom 区重叠）", z.right, z.right-z.left, hv))
-		zn, hn, hvn := layoutStatus(320, 240, 56, 300) // 最小窗（任务书最小 320x240）
-		check("status-layout-narrow", !hvn && hn.left == 0 && hn.right == 0 && zn.right == 320-8,
-			fmt.Sprintf("提示=%v（最小窗应省略提示） zoom锚=%v", hvn, zn.right))
+		/* 第四批 1/2 + T10：状态条布局与命中（layoutStatus/HitZoom/HitPin 纯逻辑直测）——
+		   T10 起右缘序 = pin(14) → zoom(56) → hint；zoom 锚右随 pin 位随动 */
+		z, pinR, h, hv := layoutStatus(1200, 600, 56, 14, 300) // 常规空间（状态 top 由 clientH 决定）
+		check("status-layout-normal", z.right == 1200-8-14-12 && z.right-z.left >= 56 && hv &&
+			h.right <= z.left-12 && pinR.right == 1200-8 && pinR.left > z.right,
+			fmt.Sprintf("zoom锚右=%v 宽=%v pin锚右=%v 提示=%v（pin 在 zoom 右缘，zoom 紧贴其左，提示不越区）",
+				z.right, z.right-z.left, pinR.right, hv))
+		zn, pinN, hn, hvn := layoutStatus(320, 240, 56, 14, 300) // 最小窗（任务书最小 320x240）
+		check("status-layout-narrow", !hvn && hn.left == 0 && hn.right == 0 && zn.right == 320-8-14-12 && pinN.right == 320-8,
+			fmt.Sprintf("提示=%v（最小窗应省略提示） zoom锚=%v pin锚=%v", hvn, zn.right, pinN.right))
 		vrShot := viewerWindowRect()
 		shotViewerRect("07-viewer-fit", vrShot)
 		// zoom 命中：用真实 paint 填充的 statusZoom（首次 viewerPaint 已在上面截图路径触发）
@@ -843,11 +858,198 @@ func runSelftest() {
 		check("viewer-memory", memBefore > 0 && memAfter > 0 && memAfterClose > 0,
 			fmt.Sprintf("私有内存：开窗前 %.1fMB → 开图后 %.1fMB（Δ %.2fMB）→ 关闭后 %.1fMB",
 				memBefore, memAfter, memAfter-memBefore, memAfterClose))
-		// 收尾批任务书 ⑤：把内存回归量级级防呆（防内核类大回归——如误开第二个 WebView2 = +100MB 级）；
-		// 实测基线随批次缓升（2.3→13.05，含段落内滚轮 PostMessage 测试与 07d 截图渲染/编码的仪表开销），
-		// 2026-10-13 修复批后经 DeepSeek 独立复测裁定 12 → 15（报告如实标注，非静默改数）
-		check("viewer-memory-cap", memAfter-memBefore > 0 && memAfter-memBefore < 15,
-			fmt.Sprintf("Δ %.2fMB < 15MB（开/关看图窗私有内存量级防呆线，DeepSeek 裁定 12→15）", memAfter-memBefore))
+		// 收尾批任务书 ⑤：内存回归量级级防呆。T8-r3 裁定换量具（2026-10-22，不是降阈值）：
+		// 判据改用 net = memAfter − memAfterClose（关窗后残留净增量）——memBefore 基线本身在
+		// 90.6~127.9MB 漂移（噪声 37MB vs 信号 1.4MB，间歇红根因，SOP 43），net 让基线天然抵消；
+		// DeepSeek 三连实测 net=1.4/1.4/1.3 方差近零。阈值 15MB 一个没动；Δpeak 保留为观测值
+		//（detail 双打印，供追溯量具切换史）。
+		net := memAfter - memAfterClose
+		check("viewer-memory-cap", net > 0 && net < 15,
+			fmt.Sprintf("Δpeak=%.2fMB（memBefore=%.1f→memAfter=%.1f，仅供观测）｜ net(memAfter−memAfterClose)=%.2fMB（判据，阈值 15）",
+				memAfter-memBefore, memBefore, memAfter, net))
+
+		/* T7 看图窗可达性（V1~V5）：三态判定 / 双击去抖 / 焦点回流。
+		   前提：内存对比已把窗口销毁（viewerDestroyForClosing），此处自包含重开，不回写内存对比。
+		   前台判定用注入探针模拟（不真实读/抢前台，T-18 红线②）；置前/回流钩子在自检态替换，
+		   三态判定逻辑照走。对照注入矩阵（先证它能失败，再信它的绿）：
+		     inj-①去关闭分支 → V2 FAIL；inj-②去去抖 → V4 FAIL；inj-③去回流 → V5 FAIL；
+		     V1/V3 在任一注入版下均应 PASS。 */
+		{
+			realOnTop := viewerOnTopProbe
+			realActivate := viewerActivate
+			realRefocus := viewerRefocusMain
+			defer func() { // 段尾/失败路径都恢复，防污染后续断言
+				viewerOnTopProbe = realOnTop
+				viewerActivate = realActivate
+				viewerRefocusMain = realRefocus
+			}()
+			viewerActivate = func(windows.Handle) {} // 自检不真置前
+
+			// 第二张测试图（10x10 纯色 PNG 现生成 → ImportImage；不依赖外部素材数量）
+			imgB := imgName
+			{
+				tmp := filepath.Join(os.TempDir(), fmt.Sprintf("t7-viewer-second-%d.png", time.Now().UnixNano()))
+				if f2, err2 := os.Create(tmp); err2 == nil {
+					px := image.NewRGBA(image.Rect(0, 0, 10, 10))
+					for i := 0; i < len(px.Pix); i += 4 {
+						px.Pix[i], px.Pix[i+1], px.Pix[i+2], px.Pix[i+3] = 0x20, 0x40, 0xC0, 0xFF
+					}
+					if err3 := png.Encode(f2, px); err3 == nil {
+						f2.Close()
+						if n2, err4 := theStore.ImportImage(tmp); err4 == nil && n2 != "" {
+							imgB = n2
+						}
+					} else {
+						f2.Close()
+					}
+				}
+				if imgB == imgName {
+					check("viewer-t7-second-image", false, "第二张测试图导入失败/同名，V3 的换图断言判别力下降")
+				}
+			}
+
+			// V1：开图后句柄有效（hwnd != 0 且 IsWindow 为真）
+			if !openImageViewer(imgName) {
+				check("viewer-t7-v1-alive", false, "重开看图窗失败（V1 无法进行）")
+			} else {
+				alive1, _, _ := pIsWindow.Call(uintptr(viewer.hwnd))
+				check("viewer-t7-v1-alive", viewer.hwnd != 0 && alive1 != 0,
+					fmt.Sprintf("hwnd=0x%x IsWindow=%v（开图后句柄必须有效）", viewer.hwnd, alive1 != 0))
+			}
+
+			// V2：同名 + 模拟「看图窗在最前」→ 必须关闭（注入形式保留：测「分支存在」；真实路径由 V6/V7 不注入覆盖）
+			waitFor(400) // 越过去抖窗（V1 刚更新 lastOpenAt）
+			refocused := false
+			viewerOnTopProbe = func() bool { return true }
+			viewerRefocusMain = func() { refocused = true }
+			openImageViewer(imgName)
+			check("viewer-t7-v2-close-same-foreground", viewer.hwnd == 0,
+				fmt.Sprintf("同名且预览窗已前台再请求: hwnd=0x%x（应已关闭；1.3.0 只换图不关）", viewer.hwnd))
+
+			// V3：重建后换另一张图 → 窗口复用不重建，name 切换
+			viewerOnTopProbe = func() bool { return false } // 模拟「不在最前」→ 走切图分支
+			if !openImageViewer(imgName) {
+				check("viewer-t7-v3-switch-image", false, "重开看图窗失败（V3 无法进行）")
+			} else {
+				hA := viewer.hwnd
+				openImageViewer(imgB)
+				alive3, _, _ := pIsWindow.Call(uintptr(viewer.hwnd))
+				check("viewer-t7-v3-switch-image", alive3 != 0 && viewer.hwnd == hA && viewer.name == imgB,
+					fmt.Sprintf("句柄复用=%v name=%q（换图应只切内容，窗口仍在原句柄）", alive3 != 0 && viewer.hwnd == hA, viewer.name))
+			}
+
+			// V4：双击去抖——先换图（更新 lastOpenAt），立即同名再请求（命中关闭判定，须被去抖拦截）
+			viewerOnTopProbe = func() bool { return true }
+			openImageViewer(imgName) // 换图分支（当前 name=imgB）→ lastOpenAt=now
+			openImageViewer(imgName) // 同名+前台+<350ms → 去抖忽略（inj-②无去抖版会关闭 → FAIL）
+			alive4, _, _ := pIsWindow.Call(uintptr(viewer.hwnd))
+			check("viewer-t7-v4-debounce", alive4 != 0 && viewer.name == imgName,
+				fmt.Sprintf("连发两次间隔<350ms: hwnd=0x%x name=%q（去抖生效，窗口应仍存在）", viewer.hwnd, viewer.name))
+
+			// V5：>去抖窗的同名+前台请求 → 真正关闭，焦点回流主窗（记录型）+ 主窗可见非最小化
+			waitFor(400)
+			refocused = false // 只认 V5 这次关闭触发的回流
+			openImageViewer(imgName)
+			vis, _, _ := pIsWindowVisible.Call(uintptr(hwnd))
+			iconic, _, _ := pIsIconic.Call(uintptr(hwnd))
+			check("viewer-t7-v5-refocus-main", viewer.hwnd == 0 && refocused && vis != 0 && iconic == 0,
+				fmt.Sprintf("关闭后: hwnd=0x%x 回流触发=%v 主窗可见=%v 最小化=%v（焦点回流的最低可判形式）",
+					viewer.hwnd, refocused, vis != 0, iconic == 0))
+
+			// V6/V7（T9-r2 条件式重排）：A 开图真实置前 → V7 关闭分支（命中=viewer 必关 / 被遮挡不得误关）
+			// → C 主窗激活后判据仍真。真实判定，不注入（T9-r2 硬要求）。
+			// 旧版判别力：V6 第二态（旧前台判据必假）+ V7 的命中=viewer 分支（旧判据走不到关闭）。
+			viewerOnTopProbe = realOnTop
+			if !openImageViewer(imgName) {
+				check("viewer-t7-v6-ontop-zorder", false, "重开看图窗失败（V6 无法进行）")
+			} else {
+				bringHwndToFront(viewer.hwnd) // 模拟「第一次点击」：真实置前（非 topmost 组顶，判据稳定）
+				waitFor(150)
+				onTop1 := viewerOnTopProbe()
+				// V7 关闭分支（条件式）：越过去抖窗后按命中分派
+				waitFor(400)
+				v7OK := true
+				v7Detail := ""
+				if viewerOnTopProbe() {
+					openImageViewer(imgName)
+					v7OK = viewer.hwnd == 0
+					v7Detail = fmt.Sprintf("命中=viewer 态再请求同名图: hwnd=0x%x（应已关闭；旧判据走不到关闭分支）", viewer.hwnd)
+					if viewer.hwnd != 0 {
+						v7Detail += " 现场=[" + viewerHitDescribe() + "]"
+					}
+				} else {
+					// 判定点被第三方窗口遮挡（如 TXGuiFoundation 类常顶窗）：用户看不见 → 收回才是缺陷
+					v7OK = viewer.hwnd != 0
+					v7Detail = "环境遮挡：命中非 viewer，不得误关（关闭分支本轮未测）——" + viewerHitDescribe()
+				}
+				check("viewer-t7-v7-reclick-closes", v7OK, v7Detail)
+				// V6 第二态：主窗被点击激活到前台 → z 序判据仍为真（不受前台切换影响；旧判据此处必假）。
+				// 若 V7 已关窗先重开（中心点不被主窗覆盖，判据成立不依赖置前）。
+				if viewer.hwnd == 0 {
+					openImageViewer(imgName)
+				}
+				bringHwndToFront(hwnd)
+				waitFor(150)
+				onTop2 := viewerOnTopProbe()
+				extra := ""
+				if !(onTop1 && onTop2) {
+					extra = " 现场=[" + viewerHitDescribe() + "]"
+				}
+				check("viewer-t7-v6-ontop-zorder", onTop1 && onTop2,
+					fmt.Sprintf("开图置前判据=%v / 主窗提到前台后判据=%v（z 序判据应不受前台切换影响；旧前台判据在第二态必假）%s", onTop1, onTop2, extra))
+			}
+
+			/* T10 §8 · V20~V22：看图窗图钉（默认不锁/独立/不持久化；V21 走真实 toggle） */
+			// V20：新开看图窗默认不含 WS_EX_TOPMOST（防初始态写 true 的回归）
+			ex20, _, _ := pGetWindowLongPtrW.Call(uintptr(viewer.hwnd), ^uintptr(19)) // GWL_EXSTYLE
+			check("tray-t10-v20-viewer-top-default-off", ex20&WS_EX_TOPMOST == 0,
+				fmt.Sprintf("exstyle=0x%x（新开窗不应含 TOPMOST 0x8；旧版本就绿，属防回归锚）", ex20))
+			// V21：toggle 两态（锁定含 TOPMOST → 再点恢复非 TOPMOST）
+			viewerTopToggle()
+			waitFor(150)
+			ex21a, _, _ := pGetWindowLongPtrW.Call(uintptr(viewer.hwnd), ^uintptr(19))
+			viewerTopToggle()
+			waitFor(150)
+			ex21b, _, _ := pGetWindowLongPtrW.Call(uintptr(viewer.hwnd), ^uintptr(19))
+			check("tray-t10-v21-viewer-top-toggle", ex21a&WS_EX_TOPMOST != 0 && ex21b&WS_EX_TOPMOST == 0,
+				fmt.Sprintf("锁定=0x%x（含TOPMOST）/回锁=0x%x（不含）", ex21a, ex21b))
+			// V22：独立性——主窗翻转不影响 viewer exstyle；viewer 翻转不影响主窗 exstyle
+			topBefore22 := alwaysOnTop
+			setTopmost(!alwaysOnTop) // 主窗翻转
+			waitFor(120)
+			ex22a, _, _ := pGetWindowLongPtrW.Call(uintptr(viewer.hwnd), ^uintptr(19))
+			setTopmost(alwaysOnTop) // 主窗恢复
+			waitFor(120)
+			viewerTopToggle() // viewer 锁定
+			waitFor(120)
+			mainEx22, _, _ := pGetWindowLongPtrW.Call(uintptr(hwnd), ^uintptr(19))
+			viewerTopToggle() // viewer 恢复（不持久化——进程内复位）
+			check("tray-t10-v22-top-independent",
+				ex22a&WS_EX_TOPMOST == 0 && mainEx22&WS_EX_TOPMOST != 0 && topBefore22 == alwaysOnTop && !viewerTopmost,
+				fmt.Sprintf("主窗翻转后 viewer 仍非TOPMOST=%v；viewer 锁定后主窗仍TOPMOST=%v；主窗状态回原=%v；viewer 已复位=%v",
+					ex22a&WS_EX_TOPMOST == 0, mainEx22&WS_EX_TOPMOST != 0, topBefore22 == alwaysOnTop, !viewerTopmost))
+
+			// V8（T7-r2 复审）：多屏 clamp 语义——单元级测 clampToVirtualScreen，不真插副屏。
+			// ①虚拟屏外点 → 必须回落虚拟屏中心（屏外窗口不得被判「在最前」）；
+			// ②虚拟屏内点 → 必须原样通过（**副屏「再点收回」的前提**：旧实现 clamp 到主屏
+			//   workarea，会把副屏点改写出判定区 → 判据恒假 → 副屏永远收不回）。
+			// 单屏机局限：虚拟屏==主屏，两版 clamp 行为一致、判别力有限；多屏判别力由
+			// 虚拟屏边界语义 + 未来多屏机复验承接（如实标注）。
+			{
+				x0 := smInt(smXVirtualScreen)
+				y0 := smInt(smYVirtualScreen)
+				w := smInt(smCxVirtualScreen)
+				h := smInt(smCyVirtualScreen)
+				outPt := pointI{x: x0 - 1000, y: y0 - 1000}
+				clampedOut := clampToVirtualScreen(outPt)
+				okOut := clampedOut.x == x0+w/2 && clampedOut.y == y0+h/2
+				inPt := pointI{x: x0 + w - 5, y: y0 + h - 5} // 虚拟屏右上角内侧
+				okIn := clampToVirtualScreen(inPt) == inPt
+				check("viewer-t7-v8-multiscreen", okOut && okIn,
+					fmt.Sprintf("屏外点 clamp=(%d,%d) 期望=(%d,%d)；屏内点原样=%v（虚拟屏 %dx%d @(%d,%d)）",
+						clampedOut.x, clampedOut.y, x0+w/2, y0+h/2, okIn, w, h, x0, y0))
+			}
+		}
 		viewerInputLocked = false // 看图窗段结束，恢复正常输入处理
 	} else {
 		check("viewer-open", false, "无测试图（selftest-image 未传），看图窗段整组跳过")
@@ -871,13 +1073,19 @@ func runSelftest() {
 		// B0 托盘已注册
 		check("tray-added", trayAdded, fmt.Sprint(trayAdded))
 
-		// B5 托盘菜单结构：3 个命令项 + 1 分隔线（GetMenuItemCount 把 MF_SEPARATOR 计为一项 → 4）；
-		// 第 1 项含「显示」、第 4 位（第 3 个命令项）含「退出」——命令文本与次序全验，结构意图与任务书一致
+		// V15（T10，B5 同位升级）：托盘菜单 5 项（4 命令+1 分隔）：隐藏窗口/显示窗口/强制最前/退出；
+		// 位置逐一验标签（旧「显示/还原、取消缩入」3 命令结构随 T10 废除）
 		menu := buildTrayMenu()
 		cnt, _, _ := pGetMenuItemCount.Call(menu)
-		s1, s3 := menuStringAt(menu, 0), menuStringAt(menu, 3)
-		check("tray-menu-structure", menu != 0 && cnt == 4 && strings.Contains(s1, "显示") && strings.Contains(s3, "退出"),
-			fmt.Sprintf("count=%v item1=%q item3-text=%q（count=3文本项+1分隔线；任务书原字面 3 系未计分隔线，已按实测校正）", cnt, s1, s3))
+		s0, s1, s2, s4 := menuStringAt(menu, 0), menuStringAt(menu, 1), menuStringAt(menu, 2), menuStringAt(menu, 4)
+		check("tray-menu-structure", menu != 0 && cnt == 5 &&
+			strings.Contains(s0, "隐藏") && strings.Contains(s1, "显示") &&
+			strings.Contains(s2, "最前") && strings.Contains(s4, "退出"),
+			fmt.Sprintf("count=%v items=[%q %q %q | %q]（4 命令+1 分隔；T10 目标结构）", cnt, s0, s1, s2, s4))
+		// V16：默认「强制最前」勾选 + alwaysOnTop=true（用户 2026-10-22 10:27 确认默认勾选）
+		st2, _, _ := selftestGetMenuState.Call(menu, uintptr(2), selftestMfByPosition)
+		check("tray-t10-v16-top-checked-default", st2&selftestMfChecked != 0 && alwaysOnTop,
+			fmt.Sprintf("menuState=0x%x（pos2 应含 MF_CHECKED 0x8）alwaysOnTop=%v", st2, alwaysOnTop))
 		pDestroyMenu.Call(menu)
 
 		// B4 触发：X/WM_CLOSE 通路（页面 api.win.close()）→ 确认弹窗出现、未直接关闭
@@ -1035,7 +1243,240 @@ func runSelftest() {
 		check("pipe-cleanup-b8", !goneLeft && !stayLeft, fmt.Sprintf("gone 在=%v stay 在=%v", goneLeft, stayLeft))
 	}
 
-	finishSelftest()
+	/* T8 · V9/V10/V11：退出卡死（P0）与取消缩入回位（P1）。
+	   V9/V10 真实起服务（pipeStartInternal 绕过 selftestMode 挡板；tick 无 todos 不推数据，
+	   对真实桌宠零数据干扰——管道名占用为毫秒级，任务书授权）；跑完 pipeResetForTest 复位。
+	   V11 真实动画+窗口移动（自检窗口会短暂移动属预期）。 */
+	{
+		// V9：无客户端时 pipeStop 500ms 内返回（旧版卡死：CloseHandle×同步 ConnectNamedPipe，3/3 复现）
+		pipeResetForTest()
+		pipeStartInternal()
+		listening := waitForState(3000, func() bool {
+			pipeMu.Lock()
+			lh := pipeListH
+			pipeMu.Unlock()
+			return lh != 0
+		})
+		stoppedOK := make(chan struct{})
+		go func() {
+			pipeStop()
+			close(stoppedOK)
+		}()
+		inTime := false
+		select {
+		case <-stoppedOK:
+			inTime = true
+		case <-time.After(500 * time.Millisecond):
+		}
+		check("pipe-t8-v9-stop-no-client", inTime && listening,
+			fmt.Sprintf("listening=%v 无客户端 pipeStop 500ms 内返回=%v（旧版必卡：监听句柄上有未完成同步 ConnectNamedPipe）", listening, inTime))
+		waitFor(200) // 留 listen 协程 ABORTED 路径自关收尾
+		pipeResetForTest()
+
+		// V10：有客户端连接时 pipeStop 500ms 内返回（旧版行为视连接时序，实测记录）
+		pipeStartInternal()
+		listening2 := waitForState(3000, func() bool {
+			pipeMu.Lock()
+			lh := pipeListH
+			pipeMu.Unlock()
+			return lh != 0
+		})
+		if !listening2 {
+			check("pipe-t8-v10-stop-with-client", false, "3s 内未进入 listening（可能管道名被外部占用），V10 未测到")
+		} else {
+			pname, _ := windows.UTF16FromString(pipeName)
+			cl, cerr := windows.CreateFile(&pname[0],
+				windows.GENERIC_READ|windows.GENERIC_WRITE, 0, nil, windows.OPEN_EXISTING, 0, 0)
+			if cerr != nil {
+				check("pipe-t8-v10-stop-with-client", false, fmt.Sprintf("自建客户端连接失败 %v", cerr))
+			} else {
+				served := waitForState(2000, func() bool {
+					pipeMu.Lock()
+					ch := pipeConnH
+					pipeMu.Unlock()
+					return ch != 0
+				})
+				stoppedOK2 := make(chan struct{})
+				go func() {
+					pipeStop()
+					close(stoppedOK2)
+				}()
+				inTime2 := false
+				select {
+				case <-stoppedOK2:
+					inTime2 = true
+				case <-time.After(500 * time.Millisecond):
+				}
+				check("pipe-t8-v10-stop-with-client", inTime2 && served,
+					fmt.Sprintf("serve 接管=%v 有客户端 pipeStop 500ms 内返回=%v（旧版行为视连接时序，实测对照记录）", served, inTime2))
+				waitFor(200) // serve defer 自关收尾
+				windows.CloseHandle(cl) // 客户端自清理
+			}
+		}
+		waitFor(150)
+		pipeResetForTest()
+
+		// V11：undock 回位（缩入态 → 动画回展开位；dock==nil / retracted==false；
+		// 随后 dock==nil 下 expandNow 不得 panic、不得移动窗口）
+		expanded := windowRect()
+		wa := primaryDisplay().WorkArea
+		if expanded.w() > 0 && expanded.right < wa.right-8 {
+			dock = &dockState{side: "right", displayID: 0, expanded: expanded}
+			setBoundsProgrammatic(retractedBounds("right", expanded, dipToPhys(stripDIP)))
+			retracted = true
+			waitFor(120)
+			undock()
+			finished := waitForState(2500, func() bool { return !animating })
+			waitFor(120)
+			cur := windowRect()
+			restored := math.Abs(float64(cur.left-expanded.left)) <= 2 &&
+				math.Abs(float64(cur.top-expanded.top)) <= 2 &&
+				math.Abs(float64(cur.right-expanded.right)) <= 2 &&
+				math.Abs(float64(cur.bottom-expanded.bottom)) <= 2
+			check("pipe-t8-v11-undock-restores-bounds", restored && dock == nil && !retracted && finished,
+				fmt.Sprintf("回位=%v cur=(%d,%d,%d,%d) 期望=(%d,%d,%d,%d) dock残留=%v retracted=%v 动画完成=%v",
+					restored, cur.left, cur.top, cur.right, cur.bottom,
+					expanded.left, expanded.top, expanded.right, expanded.bottom, dock != nil, retracted, finished))
+			before := windowRect()
+			expandNow() // dock==nil：应直接 return（旧版会 panic 风险点在此核对）
+			waitFor(120)
+			afterR := windowRect()
+			check("pipe-t8-v11-expand-after-undock", afterR == before,
+				fmt.Sprintf("dock==nil 时 expandNow 不动窗口：before=(%d,%d,%d,%d) after=(%d,%d,%d,%d)",
+					before.left, before.top, before.right, before.bottom, afterR.left, afterR.top, afterR.right, afterR.bottom))
+		}
+
+		/* T9 · V12~V14：最小化残留条 + 位置漂移 + 吸附守卫。**置于自检最末尾**（截图类断言之后）：
+		   最小化会让窗口不可见/移动窗口，测完立即恢复可见，不影响其它断言。 */
+		{
+			// V12（T9-r2 解耦）：只断言两件事，与 V7 的遗留可见窗彻底解耦：
+			// ① 主窗自身不可见（IsWindowVisible=false——iconic 时它仍为 TRUE，最小化态也抓得住）；
+			// ② 无「窄条占位」特征残留（宽 150~170 × 高 20~35 且贴主屏左下——旧 SW_MINIMIZE 的
+			//    (-149,1213,159,27) 特征；任何第三方遮挡/遗留窗口都不影响本断言）。
+			// （T9-r1 的「数全进程可见顶层窗口」设计会被任何上一段遗留可见窗拖红——V7 级联根因，已废。）
+			r0 := windowRect()
+			// V12：桥路径最小化（T9 新实现 = SW_HIDE）
+			chromium.Eval(`window.api.win.minimize()`)
+			waitFor(300)
+			mainVis, _, _ := pIsWindowVisible.Call(uintptr(hwnd))
+			stripFound := ""
+			{
+				h, _, _ := selftestGetTopWindow.Call(0)
+				myPid := uint32(os.Getpid())
+				wa := primaryDisplay().WorkArea
+				for h != 0 {
+					var pid uint32
+					pGetWindowThreadProcessId.Call(h, uintptr(unsafe.Pointer(&pid)))
+					if pid == myPid {
+						if vis, _, _ := pIsWindowVisible.Call(h); vis != 0 {
+							var wr rectI
+							pGetWindowRect.Call(h, uintptr(unsafe.Pointer(&wr)))
+							if wr.w() >= 150 && wr.w() <= 170 && wr.h() >= 20 && wr.h() <= 35 &&
+								wr.right <= wa.left+320 && wr.bottom >= wa.bottom-350 {
+								stripFound = fmt.Sprintf("hwnd=0x%x rect=(%d,%d,%d,%d)", h, wr.left, wr.top, wr.right, wr.bottom)
+							}
+						}
+					}
+					nh, _, _ := selftestGetWindow.Call(h, selftestGwHwndNext)
+					h = nh
+				}
+			}
+			check("pipe-t9-v12-minimize-no-residue", mainVis == 0 && stripFound == "",
+				fmt.Sprintf("主窗已隐藏=%v（应 true）；特征占位条=%s（应无；旧版 159x27@屏左下）", mainVis == 0, stripFound))
+			// V13：托盘还原路径 → 回最小化前位置（旧版无条件套 dock.expanded → 跳左侧）。
+			// T9-r1 修正：前置**人为污染 dock**（模拟用户实测的机理——最小化期间旧吸附逻辑
+			// 用占位矩形误设 dock）：旧版 restoreFromTray 套 dock.expanded 跳位红；
+			// 新版 retracted=false 走 lastVisibleBounds 分支、不吃污染 → 回位绿。测完清污染。
+			dock = &dockState{side: "left", displayID: 0, expanded: rectI{left: 0, top: 1213, right: 159, bottom: 1240}}
+			restoreFromTray()
+			visible := waitForState(3000, func() bool {
+				vis, _, _ := pIsWindowVisible.Call(uintptr(hwnd))
+				ico, _, _ := pIsIconic.Call(uintptr(hwnd))
+				return vis != 0 && ico == 0
+			})
+			waitFor(200)
+			r1 := windowRect()
+			kept := math.Abs(float64(r1.left-r0.left)) <= 2 && math.Abs(float64(r1.top-r0.top)) <= 2 &&
+				math.Abs(float64(r1.right-r0.right)) <= 2 && math.Abs(float64(r1.bottom-r0.bottom)) <= 2
+			check("pipe-t9-v13-restore-keeps-bounds", kept && visible,
+				fmt.Sprintf("托盘还原 rect=(%d,%d,%d,%d) 期望=(%d,%d,%d,%d) 可见=%v（旧版把误设吸附位当还原目标）",
+					r1.left, r1.top, r1.right, r1.bottom, r0.left, r0.top, r0.right, r0.bottom, visible))
+			dock = nil // T9-r1：清 V13 的污染前置，防带进 V14
+			// V14：最小化态直调 snapNow → dock 不得变化（守卫应直接 return；旧版用占位矩形吸附）
+			pShowWindow.Call(uintptr(hwnd), SW_MINIMIZE) // 直调（绕过桥）= 外部途径 Win+M 的等价物
+			waitFor(300)
+			dockBefore := dock
+			retractedBefore := retracted
+			snapNow()
+			same := dock == dockBefore && retracted == retractedBefore
+			pShowWindow.Call(uintptr(hwnd), SW_RESTORE)
+			pShowWindow.Call(uintptr(hwnd), SW_SHOW)
+			if chromium != nil {
+				_ = chromium.Show()
+			}
+			waitFor(200)
+			check("pipe-t9-v14-snap-skip-when-iconic", same,
+				fmt.Sprintf("最小化态 snapNow 后 dock/retracted 变化=%v（应 false；旧版会把占位矩形 (-149,1213,159,27) 判成贴左下）", !same))
+		}
+
+		/* T10 · V17~V19：托盘菜单三件（直调 handleTrayCommand 白盒测分发语义——
+		   旧版判别力：命令 ID 语义已重定义，旧 trayCmdShow=显示 vs 新=隐藏）。 */
+		{
+			// V17：隐藏窗口 → 显示窗口（回最小化前位置）
+			r0v17 := windowRect()
+			handleTrayCommand(trayCmdHide)
+			waitFor(250)
+			visHide, _, _ := pIsWindowVisible.Call(uintptr(hwnd))
+			handleTrayCommand(trayCmdShow) // 三位一体 → 隐藏分支
+			visOK := waitForState(3000, func() bool {
+				v, _, _ := pIsWindowVisible.Call(uintptr(hwnd))
+				return v != 0
+			})
+			waitFor(200)
+			r1v17 := windowRect()
+			check("tray-t10-v17-hide-then-show", visHide == 0 && visOK &&
+				math.Abs(float64(r1v17.left-r0v17.left)) <= 2 && math.Abs(float64(r1v17.top-r0v17.top)) <= 2 &&
+				math.Abs(float64(r1v17.right-r0v17.right)) <= 2 && math.Abs(float64(r1v17.bottom-r0v17.bottom)) <= 2,
+				fmt.Sprintf("隐藏后可见=%v（应 false）→显示回位=(%d,%d,%d,%d) vs R0=(%d,%d,%d,%d) 可见=%v",
+					visHide == 0, r1v17.left, r1v17.top, r1v17.right, r1v17.bottom,
+					r0v17.left, r0v17.top, r0v17.right, r0v17.bottom, visOK))
+			// V18：三位一体——①缩入态 show ⇒ 弹回 dock.expanded；②前台态（可见未隐藏）show ⇒ 位置不变仅置前
+			exp18 := windowRect()
+			dock = &dockState{side: "right", displayID: 0, expanded: exp18}
+			setBoundsProgrammatic(retractedBounds("right", exp18, dipToPhys(stripDIP)))
+			retracted = true
+			handleTrayCommand(trayCmdShow)
+			animDone := waitForState(2500, func() bool { return !animating })
+			waitFor(120)
+			r18 := windowRect()
+			dock = nil
+			retracted = false
+			// ② 前台态：白盒污染 lastVisibleBounds → 新版 else 分支只置前不动位置（旧版 1.3.2 会套污染位跳走）
+			lastVisibleBounds = rectI{left: 5, top: 5, right: 200, bottom: 200}
+			posBefore := windowRect()
+			handleTrayCommand(trayCmdShow)
+			waitFor(200)
+			posAfter := windowRect()
+			lastVisibleBounds = posBefore
+			check("tray-t10-v18-show-three-in-one", animDone &&
+				math.Abs(float64(r18.left-exp18.left)) <= 2 && math.Abs(float64(r18.top-exp18.top)) <= 2 &&
+				math.Abs(float64(r18.right-exp18.right)) <= 2 && math.Abs(float64(r18.bottom-exp18.bottom)) <= 2 &&
+				posAfter == posBefore,
+				fmt.Sprintf("缩入→show 回位=(%d,%d,%d,%d) 期望=(%d,%d,%d,%d) 动画完成=%v；前台→show 位置不变=%v",
+					r18.left, r18.top, r18.right, r18.bottom, exp18.left, exp18.top, exp18.right, exp18.bottom, animDone, posAfter == posBefore))
+			// V19：托盘「强制最前」toggle → alwaysOnTop 翻转 + 前端 btn-top active 同步
+			topBefore := alwaysOnTop
+			handleTrayCommand(trayCmdTop)
+			topAfter := alwaysOnTop
+			activeJS, okJS := evalJSON(`document.getElementById('btn-top').classList.contains('active')`, 4000)
+			handleTrayCommand(trayCmdTop) // 恢复原勾选态
+			waitFor(150)
+			check("tray-t10-v19-top-toggle-sync", topBefore != topAfter && okJS && (activeJS == "true") == topAfter,
+				fmt.Sprintf("toggle 前=%v 后=%v 前端active=%q（应与后态一致）", topBefore, topAfter, activeJS))
+		}
+
+		finishSelftest()
+	}
 }
 
 /* shotViewerRect：看图窗截屏——确定性方案：把 viewerPaint（近黑底→HALFTONE位图→状态条）

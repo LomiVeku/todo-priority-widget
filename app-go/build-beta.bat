@@ -4,7 +4,7 @@ rem  Todo widget Go build -- beta (public) edition
 rem  Uses the project-bundled Go toolchain (..\toolchain\go), no install needed
 rem  Produces: dist\build-beta-out.exe (ASCII name; the installer embeds it and
 rem            extracts as the public Chinese filename via UTF-16 syscalls)
-rem  Version: -X main.appVersion=1.0beta (build-time override)
+rem  Version: -X main.appVersion=1.1beta (build-time override)
 rem  Resources: rsrc_windows_amd64.syso (go-winres: icon + VERSIONINFO + GUI manifest)
 rem  NOTE: ASCII only -- cmd.exe parses bat files in the OEM codepage
 rem ============================================================
@@ -24,13 +24,13 @@ echo [1/4] go version
 go version
 if errorlevel 1 goto :fail
 
-[2/4] generate resources (icon + VERSIONINFO 1.0beta)
+echo [2/4] generate resources (icon + VERSIONINFO 1.1beta)
 go-winres make --in winres\winres-beta.json --out rsrc --arch amd64
 if errorlevel 1 goto :fail
 
-echo [3/4] go build (1.0beta + icon syso)
+echo [3/4] go build (1.1beta + icon syso)
 if not exist dist mkdir dist
-go build -trimpath -ldflags "-s -w -H windowsgui -X main.appVersion=1.0beta" -o "dist\build-beta-out.exe" .
+go build -trimpath -buildvcs=false -ldflags "-s -w -H windowsgui -X main.appVersion=1.1beta" -o "dist\build-beta-out.exe" .
 if errorlevel 1 goto :fail
 
 echo [4/4] sync assets to dist\assets

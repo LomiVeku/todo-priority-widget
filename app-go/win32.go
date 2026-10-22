@@ -99,6 +99,8 @@ const (
 
 	WS_EX_APPWINDOW    = 0x00040000
 	WS_EX_TOOLWINDOW   = 0x00000080 // 1.2.0 批：主窗/看图窗改用（不出任务栏、不进 Alt+Tab）
+	WS_EX_TOPMOST      = 0x00000008 // T10：置顶样式位（V20~V22 断言与图钉实现）
+	MF_CHECKED         = 0x00000008 // T10：托盘勾选标记（与 WS_EX_TOPMOST 数值相同、语义不同，勿混用）
 
 	HWND_TOPMOST   = ^uintptr(0) // (HWND)-1
 	HWND_NOTOPMOST = ^uintptr(1) // (HWND)-2
@@ -113,6 +115,7 @@ const (
 	SW_SHOW     = 5
 	SW_MINIMIZE = 6
 	SW_RESTORE  = 9
+	SW_HIDE     = 0 // T9：minimize 改隐藏路径（工具窗真最小化会留占位条）
 
 	WM_DESTROY       = 0x0002
 	WM_SIZE          = 0x0005
@@ -398,6 +401,8 @@ var (
 	animEnd  time.Time
 	animStart time.Time
 
+	lastVisibleBounds rectI // T9：最后一次「可见且非 iconic」的窗口矩形（托盘还原回位基准）
+
 	closing   bool
 	trayAdded bool
 	trayIcon  windows.Handle
@@ -657,11 +662,31 @@ func setWindowBounds(b rectI) {
 }
 
 func setTopmost(top bool) {
+	setTopmostHwnd(hwnd, top)
+}
+
+// setTopmostHwnd：泛化置顶（T10：主窗与看图窗共用一套实现；SWP_NOMOVE|NOSIZE|NOACTIVATE
+// 不动几何不抢激活）
+func setTopmostHwnd(h windows.Handle, top bool) {
 	flag := uintptr(HWND_NOTOPMOST)
 	if top {
 		flag = HWND_TOPMOST
 	}
-	pSetWindowPos.Call(uintptr(hwnd), flag, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE)
+	pSetWindowPos.Call(uintptr(h), flag, 0, 0, 0, 0, SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE)
+}
+
+// hideMainWindow：T10——隐藏窗口的单一实现（桥路径 win:minimize 与托盘「隐藏窗口」共用）。
+// 仅 !IsIconic 时记录 lastVisibleBounds（iconic 占位矩形是脏数据，T9 已立规）。
+func hideMainWindow() {
+	if iconic, _, _ := pIsIconic.Call(uintptr(hwnd)); iconic == 0 {
+		if b := windowRect(); b.w() > 0 && b.h() > 0 {
+			lastVisibleBounds = b
+		}
+	}
+	if chromium != nil {
+		_ = chromium.Hide()
+	}
+	pShowWindow.Call(uintptr(hwnd), SW_HIDE)
 }
 
 func showMainWindow() {
@@ -749,6 +774,11 @@ func wndProc(h windows.Handle, msg uint32, wParam, lParam uintptr) uintptr {
 		return 0
 
 	case WM_MOVE, WM_MOVING:
+		// T9 修：最小化态的 windowRect 是系统占位矩形（如 (-149,1213,159,27)），喂给吸附
+		// 会把"最小化"误判成"用户拖到屏角"→ dock 被误设 → 托盘还原时跳错误位置（用户实测）。
+		if iconic, _, _ := pIsIconic.Call(uintptr(hwnd)); iconic != 0 {
+			return 0 // 最小化态：不做吸附定时、不落盘
+		}
 		if !animating && time.Now().After(suppressMoveUntil) && !retracted {
 			// 移动停顿 240ms → 吸附判定（对应 Electron 的 move 去抖）
 			setTimer(timerSnap, 240, func() { snapNow() })
@@ -761,6 +791,10 @@ func wndProc(h windows.Handle, msg uint32, wParam, lParam uintptr) uintptr {
 
 	case WM_EXITSIZEMOVE:
 		killTimer(timerSnap)
+		// T9 修：同上——最小化态不吸附、不落盘
+		if iconic, _, _ := pIsIconic.Call(uintptr(hwnd)); iconic != 0 {
+			return 0
+		}
 		if !animating && time.Now().After(suppressMoveUntil) && !retracted {
 			snapNow() // 拖动结束 → 判定吸附
 		}
@@ -860,8 +894,16 @@ func bringToFront() {
 	if chromium != nil {
 		_ = chromium.Show()
 	}
-	// 前台锁兜底：GetForegroundWindow → GetWindowThreadProcessId 返回值=前台线程 ID（注意：
-	// 该函数第二参数是可选的进程 ID 输出，不是线程 ID——首版误把输出参数当线程 ID 用，兜底失效）
+	bringHwndToFront(hwnd)
+	focusWebView()
+}
+
+// bringHwndToFront：通用置前（前台锁兜底），供主窗 bringToFront 与看图窗（T7）共用。
+// 只提层级与前台，**不读不改窗口位置**——多显示器下看图窗不跳屏（T7 边界 4：
+// 用户场景是"窗口在别的屏/被盖住"，跳到当前屏比"在后面"更难受）。
+// 前台锁兜底：GetForegroundWindow → GetWindowThreadProcessId 返回值=前台线程 ID（注意：
+// 该函数第二参数是可选的进程 ID 输出，不是线程 ID——首版误把输出参数当线程 ID 用，兜底失效）
+func bringHwndToFront(h windows.Handle) {
 	cur := windows.GetCurrentThreadId()
 	fgH, _, _ := pGetForegroundWindow.Call()
 	fgThread, _, _ := pGetWindowThreadProcessId.Call(fgH, 0)
@@ -869,12 +911,11 @@ func bringToFront() {
 	if attached {
 		pAttachThreadInput.Call(uintptr(cur), uintptr(fgThread), 1)
 	}
-	pBringWindowToTop.Call(uintptr(hwnd))
-	pSetForegroundWindow.Call(uintptr(hwnd))
+	pBringWindowToTop.Call(uintptr(h))
+	pSetForegroundWindow.Call(uintptr(h))
 	if attached {
 		pAttachThreadInput.Call(uintptr(cur), uintptr(fgThread), 0)
 	}
-	focusWebView()
 }
 
 // pipeStop 的消息/句柄归属：见 pipe.go（requestClose 真退路径调用 pipeStop()）。
@@ -883,10 +924,13 @@ func bringToFront() {
 
 const trayUID = 1
 
+// T10：托盘命令 ID 重排（1.4.0 菜单：隐藏窗口/显示窗口/强制最前/退出）。
+// trayExit 的断言锚（tray-exit-direct）锚定的是 trayExit() 函数本身，不依赖 ID 数字。
 const (
-	trayCmdShow   = 1
-	trayCmdUndock = 2
-	trayCmdExit   = 3
+	trayCmdHide = 1 // 隐藏窗口（记 lastVisibleBounds → SW_HIDE）
+	trayCmdShow = 2 // 显示窗口（三位一体：缩入弹出/隐藏显示/可见仅置前）
+	trayCmdTop  = 3 // 强制最前（勾选切换，MF_CHECKED 动态）
+	trayCmdExit = 4 // 退出（直关）
 )
 
 func addTray() {
@@ -930,27 +974,91 @@ func handleTray(lParam uintptr) {
 }
 
 func restoreFromTray() {
-	pShowWindow.Call(uintptr(hwnd), SW_RESTORE)
-	pShowWindow.Call(uintptr(hwnd), SW_SHOW)
-	pSetForegroundWindow.Call(uintptr(hwnd))
-	if dock != nil && !retracted {
-		setWindowBounds(dock.expanded)
+	// T10 三位一体（「显示窗口」）：缩入 → 弹出展开；隐藏/最小化 → 恢复可见并回最后可见位；
+	// 可见但不在最前 → 仅置前（**不动位置**——用户点别的页盖住后，点「显示窗口」只要它上来）。
+	if retracted {
+		expandNow() // 缩入态：展开回 dock.expanded（T9 语义不变）
+	} else {
+		vis, _, _ := pIsWindowVisible.Call(uintptr(hwnd))
+		ico, _, _ := pIsIconic.Call(uintptr(hwnd))
+		if vis == 0 || ico != 0 {
+			// 隐藏/最小化态：恢复可见（chromium.Show 与 Hide 对称），回位优先级：
+			// lastVisibleBounds → 持久化几何兜底（非法/屏外 clamp 回工作区）
+			pShowWindow.Call(uintptr(hwnd), SW_RESTORE)
+			pShowWindow.Call(uintptr(hwnd), SW_SHOW)
+			if chromium != nil {
+				_ = chromium.Show()
+			}
+			if lastVisibleBounds.w() > 0 && lastVisibleBounds.h() > 0 {
+				setWindowBounds(clampToWorkArea(lastVisibleBounds))
+			} else if st := theStore.LoadWindowState(); st != nil {
+				// window.json 兜底（DIP→物理）
+				if x, xok := st["x"].(float64); xok {
+					if y, yok := st["y"].(float64); yok {
+						if w, wok := st["width"].(float64); wok {
+							if hh, hok := st["height"].(float64); hok {
+								setWindowBounds(clampToWorkArea(rectI{
+									left:   int32(math.Round(x*dpiScale)),
+									top:    int32(math.Round(y*dpiScale)),
+									right:  int32(math.Round(x*dpiScale)) + int32(math.Round(w*dpiScale)),
+									bottom: int32(math.Round(y*dpiScale)) + int32(math.Round(hh*dpiScale)),
+								}))
+							}
+						}
+					}
+				}
+			}
+			pSetForegroundWindow.Call(uintptr(hwnd))
+		} else {
+			// 可见态：只置前，不动位置（T9 的回位语义在这里不再重复执行）
+			bringHwndToFront(hwnd)
+		}
 	}
 	focusWebView()
 }
 
-// buildTrayMenu：构建托盘右键菜单（1.2.0 批自 showTrayMenu 拆出，供自检直读结构）。
-// 返回菜单句柄；项序固定：显示/还原、取消缩入、分隔线、退出。
+// clampToWorkArea：把矩形 clamp 回主屏工作区（T10 边界：拖出屏外的窗被「显示窗口」拉起
+// 时至少回到可见区；w/h 不变，只挪 left/top）
+func clampToWorkArea(b rectI) rectI {
+	wa := primaryDisplay().WorkArea
+	if b.right > wa.right {
+		b.left -= b.right - wa.right
+		b.right = wa.right
+	}
+	if b.left < wa.left {
+		b.right += wa.left - b.left
+		b.left = wa.left
+	}
+	if b.bottom > wa.bottom {
+		b.top -= b.bottom - wa.bottom
+		b.bottom = wa.bottom
+	}
+	if b.top < wa.top {
+		b.bottom += wa.top - b.top
+		b.top = wa.top
+	}
+	return b
+}
+
+// buildTrayMenu：构建托盘右键菜单（T10 重构）。
+// 项序固定：隐藏窗口 / 显示窗口 / 强制最前（按 alwaysOnTop 动态 MF_CHECKED）/ 分隔线 / 退出。
+// 返回菜单句柄；V15/V16 断言锚定本结构与勾选态。
 func buildTrayMenu() uintptr {
 	menu, _, _ := pCreatePopupMenu.Call()
 	if menu == 0 {
 		return 0
 	}
-	t1, _ := windows.UTF16PtrFromString("显示 / 还原")
-	t2, _ := windows.UTF16PtrFromString("取消缩入")
+	t1, _ := windows.UTF16PtrFromString("隐藏窗口")
+	t2, _ := windows.UTF16PtrFromString("显示窗口")
+	t3, _ := windows.UTF16PtrFromString("强制最前")
 	t4, _ := windows.UTF16PtrFromString("退出")
-	pAppendMenuW.Call(menu, MF_STRING, trayCmdShow, uintptr(unsafe.Pointer(t1)))
-	pAppendMenuW.Call(menu, MF_STRING, trayCmdUndock, uintptr(unsafe.Pointer(t2)))
+	pAppendMenuW.Call(menu, MF_STRING, trayCmdHide, uintptr(unsafe.Pointer(t1)))
+	pAppendMenuW.Call(menu, MF_STRING, trayCmdShow, uintptr(unsafe.Pointer(t2)))
+	topFlags := uintptr(MF_STRING)
+	if alwaysOnTop {
+		topFlags |= MF_CHECKED
+	}
+	pAppendMenuW.Call(menu, topFlags, trayCmdTop, uintptr(unsafe.Pointer(t3)))
 	pAppendMenuW.Call(menu, MF_SEPARATOR, 0, 0)
 	pAppendMenuW.Call(menu, MF_STRING, trayCmdExit, uintptr(unsafe.Pointer(t4)))
 	return menu
@@ -983,15 +1091,31 @@ func showTrayMenu() {
 		uintptr(pt.x), uintptr(pt.y), 0, uintptr(hwnd), 0)
 	pDestroyMenu.Call(menu)
 
+	handleTrayCommand(cmd)
+}
+
+// handleTrayCommand：托盘命令分发（T10 自 showTrayMenu 抽出——自检可直调，
+// V17/V18/V19 的菜单入口判别力靠它；cmd 语义见 trayCmd* 常量）。
+func handleTrayCommand(cmd uintptr) {
 	switch cmd {
+	case trayCmdHide:
+		hideMainWindow()
 	case trayCmdShow:
-		restoreFromTray()
-	case trayCmdUndock:
-		undock()
-		restoreFromTray()
+		restoreFromTray() // 三位一体「显示窗口」
+	case trayCmdTop:
+		toggleTopmost() // 与主界面 btn-top 同一实现（V19 同步）
 	case trayCmdExit:
 		trayExit()
 	}
+}
+
+// toggleTopmost：强制最前的唯一翻转实现（T10）——主界面 btn-top 与托盘「强制最前」共用；
+// 翻转 → setTopmost → broadcastWinState（前端 btn-top active 跟变）→ persist（重启保持）。
+func toggleTopmost() {
+	alwaysOnTop = !alwaysOnTop
+	setTopmost(alwaysOnTop)
+	broadcastWinState()
+	scheduleGeometrySave() // 借道落盘 alwaysOnTop（600ms 防抖；隐藏态由守卫挡住——T9 规则）
 }
 
 // trayExit：托盘「退出」唯一实现点——直调 requestClose()，**不弹确认**（1.2.0 批 B4 固化：
@@ -1067,6 +1191,10 @@ func snapNow() {
 	if !dockEnabled {
 		return
 	}
+	// T9 修：最小化态的 windowRect 是系统占位矩形（非用户意图位置），任何吸附判定都是脏数据
+	if iconic, _, _ := pIsIconic.Call(uintptr(hwnd)); iconic != 0 {
+		return
+	}
 	b := windowRect()
 	found := computeSnap(b, listDisplays(), dipToPhys(snapThresholdDIP))
 	if found == nil {
@@ -1132,8 +1260,21 @@ func expandNow() {
 	animateTo(dock.expanded, 170)
 }
 
+// undock：取消缩入（托盘菜单 trayCmdUndock）。
+// T8 修（P1）：旧版只清状态不动几何——缩入态下点「取消缩入」后窗口留在只露 strip 的
+// 位置，且 expandNow 因 dock==nil 被第一句挡回 → 此后悬停永远不会再展开（用户实测缺陷）。
+// 现版：缩入态先取展开位再清状态，animateTo 回位（170ms）；展开态维持原行为（窗口本就在位）。
+// 动画帧安全：animTick 不读 dock（T8 复核）；animateTo 可重入（animFrom 每次取当前位）。
 func undock() {
 	killTimer(timerRetract)
+	if dock != nil && retracted {
+		target := dock.expanded // 先取，再清
+		dock = nil
+		retracted = false
+		broadcastDock()
+		animateTo(target, 170)
+		return
+	}
 	dock = nil
 	retracted = false
 	broadcastDock()
@@ -1230,10 +1371,18 @@ func onDisplaysChanged() {
 	pushDisplays()
 }
 
-// scheduleGeometrySave：移动/缩放结束后 600ms 落盘窗口几何
+// scheduleGeometrySave：移动/缩放结束后 600ms 落盘窗口几何。
+// T9 修：①最小化态（iconic）不启动落盘——占位矩形是脏数据；②顺带更新 lastVisibleBounds
+//（最后可见几何，托盘还原回位基准——移动/缩放路径是它的自然采集点）。
 func scheduleGeometrySave() {
 	if closing {
 		return
+	}
+	if iconic, _, _ := pIsIconic.Call(uintptr(hwnd)); iconic != 0 {
+		return
+	}
+	if b := windowRect(); b.w() > 0 && b.h() > 0 {
+		lastVisibleBounds = b
 	}
 	killTimer(timerGeometry)
 	setTimer(timerGeometry, 600, func() { persistWindowState() })
@@ -1242,6 +1391,10 @@ func scheduleGeometrySave() {
 // persistWindowState：写独立 window.json（吸附中不写 x/y，下次启动不沿用贴边坐标）
 func persistWindowState() {
 	if hwnd == 0 {
+		return
+	}
+	// T9 修：最小化态不落盘（600ms 定时器触发时窗已最小化——占位矩形会把脏 x/y 写进 window.json）
+	if iconic, _, _ := pIsIconic.Call(uintptr(hwnd)); iconic != 0 {
 		return
 	}
 	b := windowRect()

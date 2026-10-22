@@ -26,8 +26,8 @@ import (
 )
 
 // 版本规则见 版本登记-内部.md：修 bug / UI L3 微调 +0.0.1；新功能 / UI L1+L2 大调 +0.1.0；升 0.1.0 清零 0.0.1。
-// T6 桌宠提醒对接为新功能 → 内部 1.3.0；对外打包构建期覆盖：-ldflags "-X main.appVersion=1.0beta"
-var appVersion = "1.3.0"
+// T10 三入口强制最前+托盘菜单重构为新功能 → 内部 1.4.0；对外打包构建期覆盖：-ldflags "-X main.appVersion=1.0beta"
+var appVersion = "1.4.0"
 
 var (
 	appAssetsDir  string

@@ -362,7 +362,9 @@ func handleRequest(id int, typ string, payload json.RawMessage) {
 func handleEvent(typ string, payload json.RawMessage) {
 	switch typ {
 	case "win:minimize":
-		pShowWindow.Call(uintptr(hwnd), SW_MINIMIZE)
+		// T10：隐藏逻辑收敛到 hideMainWindow()（与托盘「隐藏窗口」同一实现——
+		// T9 的行为语义不变：记 lastVisibleBounds → chromium.Hide → SW_HIDE）
+		hideMainWindow()
 	case "win:close":
 		// 1.2.0 批：X 按钮（btn-close → win.close()）也走确认通路；托盘「退出」不经页面直关
 		beginCloseFlow()

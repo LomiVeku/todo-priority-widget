@@ -84,11 +84,127 @@ var (
 	pGetProcessMemoryInfo = psapisys.NewProc("GetProcessMemoryInfo")
 	pCreateFontW           = gdi32sys.NewProc("CreateFontW")
 	pGetTextExtentPoint32W = gdi32sys.NewProc("GetTextExtentPoint32W")
+	pMoveToEx              = gdi32sys.NewProc("MoveToEx") // T10 图钉
+	pLineTo                = gdi32sys.NewProc("LineTo")
+	pEllipse               = gdi32sys.NewProc("Ellipse")
+	pCreatePen             = gdi32sys.NewProc("CreatePen")
+
+	// T7-r2：z 序几何判据用（「用户此刻看到的是不是看图窗」）
+	pWindowFromPoint = user32.NewProc("WindowFromPoint") // POINT 按值传参（x64：低32位x|高32位y）
+	pGetAncestor     = user32.NewProc("GetAncestor")     // GA_ROOT 归约
+	pClientToScreen  = user32.NewProc("ClientToScreen")  // 客户区点 → 屏幕点
+	// pGetSystemMetrics 在 win32.go:368 已定义（T7-r2 复审曾重复声明，已删——M-K11 撞号第三次）
+	// T8 复审：V6/V7 判据为 false 时的现场取证（区分「桌面被挡」vs「判据坏了」）
+	pGetClassNameW = user32.NewProc("GetClassNameW")
 )
+
+const gaRoot = 2 // GA_ROOT
+
+// GetSystemMetrics 索引：虚拟屏四界（MSDN SM_XVIRTUALSCREEN=76…SM_CYVIRTUALSCREEN=79）
+const (
+	smXVirtualScreen  = 76 // 0x4C
+	smYVirtualScreen  = 77 // 0x4D
+	smCxVirtualScreen = 78 // 0x4E
+	smCyVirtualScreen = 79 // 0x4F
+)
+
+// clampToVirtualScreen：把屏幕坐标点约束进**虚拟屏**（全部显示器的外接矩形）。
+// 单屏机上虚拟屏==主屏。多屏语义：副屏坐标原样通过（WindowFromPoint 接受虚拟桌面
+// 坐标，副屏「再点收回」由此生效）；只有点真的在所有屏之外（窗口被拖出屏幕）才
+// 回落到虚拟屏中心——保留「屏外窗口不误判在最前」的保守方向。
+func clampToVirtualScreen(pt pointI) pointI {
+	x0, y0 := smInt(smXVirtualScreen), smInt(smYVirtualScreen)
+	w, h := smInt(smCxVirtualScreen), smInt(smCyVirtualScreen)
+	if w <= 0 || h <= 0 {
+		return pt
+	}
+	if pt.x < x0 || pt.x >= x0+w || pt.y < y0 || pt.y >= y0+h {
+		return pointI{x: x0 + w/2, y: y0 + h/2}
+	}
+	return pt
+}
+
+// smInt：GetSystemMetrics 包一层返回 int32（API 返回值即 32 位；与 pointI.x 同型）
+func smInt(index uint32) int32 {
+	v, _, _ := pGetSystemMetrics.Call(uintptr(index))
+	return int32(v)
+}
 
 const viewerClassName = "TodoGoImageWindow"
 const viewerStatusH = 26.0
 const viewerHintText = "滚轮缩放 · 双击切适应/100% · Esc 关闭"
+
+// T7：双击去抖窗。前端 click 在双击时会连发两次 image:view；三态判定引入「同名+前台=关闭」后，
+// 第二击会命中关闭分支形成 开→关 闪烁。关闭请求距最近一次开窗/切图动作 <350ms 时忽略
+//（视为双击第二下）。阈值写常量不写魔数（任务书 §三 边界 1）。
+const viewerDebounceWindow = 350 * time.Millisecond
+
+// T7-r2：viewerIsOnTop——「用户此刻看到的是不是看图窗」的真实几何判定。
+// 取看图窗客户区中心（clamp 到主屏工作区内），按 z 序问 WindowFromPoint：该点最上面的
+// 窗口若是看图窗（或其根窗口==看图窗）即判「在最前」。
+// **为什么不用 GetForegroundWindow**（1.3.1 实机缺陷根因）：第二次点缩略图时，**点击本身**
+// 会把前台交回主窗（点哪个窗，哪个窗被激活）——进入判定时前台已是主窗 → 前台判据恒假 →
+// 关闭分支在真实交互里不可达（自检 V2 能过是因为注入了假探针，测的是分支存在、非条件成立）。
+// WindowFromPoint 只看 z 序几何，不受点击激活影响。
+// 多屏边界（T7-r2 复审改）：判定点 clamp 到**虚拟屏**（全显示器外接矩形）——副屏上
+// 开着看图窗、再点缩略图同样能收回（WindowFromPoint 接受虚拟桌面坐标）；只有窗口被
+// 拖出所有屏（点出虚拟屏）才判「不在最前」→ 提层级、不挪位（边界 4：跳屏比在后面更难受）。
+func viewerIsOnTop() bool {
+	if viewer.hwnd == 0 {
+		return false
+	}
+	if alive, _, _ := pIsWindow.Call(uintptr(viewer.hwnd)); alive == 0 {
+		return false
+	}
+	var cr rectI
+	pGetClientRect.Call(uintptr(viewer.hwnd), uintptr(unsafe.Pointer(&cr)))
+	pt := pointI{x: cr.w() / 2, y: cr.h() / 2}
+	pClientToScreen.Call(uintptr(viewer.hwnd), uintptr(unsafe.Pointer(&pt)))
+	pt = clampToVirtualScreen(pt)
+	hit, _, _ := pWindowFromPoint.Call(uintptr(uint32(pt.x)) | uintptr(uint32(pt.y))<<32)
+	if hit == 0 {
+		return false
+	}
+	if windows.Handle(hit) == viewer.hwnd {
+		return true
+	}
+	root, _, _ := pGetAncestor.Call(hit, gaRoot)
+	return windows.Handle(root) == viewer.hwnd
+}
+
+// viewerHitDescribe：V6/V7 判据为 false 时的现场描述——命中窗口的 hwnd/类名/矩形 +
+// 判定点坐标 + 期望对象。用途（T8 复审）：下次 V6/V7 红，一眼分清「桌面被第三方窗口
+// 挡住（环境噪声，类名是别的应用）」还是「判据坏了（命中=0 或奇怪的窗口）」，不必重跑。
+func viewerHitDescribe() string {
+	var cr rectI
+	pGetClientRect.Call(uintptr(viewer.hwnd), uintptr(unsafe.Pointer(&cr)))
+	pt := pointI{x: cr.w() / 2, y: cr.h() / 2}
+	pClientToScreen.Call(uintptr(viewer.hwnd), uintptr(unsafe.Pointer(&pt)))
+	pt = clampToVirtualScreen(pt)
+	hit, _, _ := pWindowFromPoint.Call(uintptr(uint32(pt.x)) | uintptr(uint32(pt.y))<<32)
+	if hit == 0 {
+		return fmt.Sprintf("命中=0x0（无窗口，点可能出虚拟屏）判定点=(%d,%d)", pt.x, pt.y)
+	}
+	buf := make([]uint16, 128)
+	n, _, _ := pGetClassNameW.Call(hit, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+	var wr rectI
+	pGetWindowRect.Call(hit, uintptr(unsafe.Pointer(&wr)))
+	return fmt.Sprintf("命中 hwnd=0x%x 类名=%q 矩形=(%d,%d,%d,%d) 判定点=(%d,%d)（期望=viewer 0x%x）",
+		hit, windows.UTF16ToString(buf[:n]), wr.left, wr.top, wr.right, wr.bottom, pt.x, pt.y, viewer.hwnd)
+}
+
+// T7：三态判定的可注入钩子。
+//   - viewerOnTopProbe：「看图窗是否在最前」判定。默认=viewerIsOnTop（真实 z 序几何，
+//     T7-r2）；自检 V2~V5 注入受控 bool（测「分支存在」，不真抢前台——T-18 红线②）；
+//     **V6/V7 硬要求不注入、走真实判定**（否则旧判据类错误永远测不出来——1.3.1 教训：
+//     探针把真实路径短路了，条件错误在自检全绿下漏网）。
+//   - viewerActivate：把看图窗提到最前（创建/切图/还原分支）。自检态替换为空操作，防真实抢前台。
+//   - viewerRefocusMain：关闭后把焦点交回主窗（边界 2）。自检态替换为记录型空操作，V5 据此断言。
+var (
+	viewerOnTopProbe  = viewerIsOnTop
+	viewerActivate    = func(h windows.Handle) { bringHwndToFront(h) }
+	viewerRefocusMain = func() { bringHwndToFront(hwnd) }
+)
 
 type viewerBMIHeader struct {
 	biSize          uint32
@@ -150,9 +266,10 @@ type imageViewer struct {
 	lastX    int32
 	lastY    int32
 
-	// 底部状态条布局（第四批：可见提示行 + 可点 zoom）
+	// 底部状态条布局（第四批：可见提示行 + 可点 zoom；T10：pin 图钉区）
 	statusLeft   rectI  // 左侧 名称·尺寸 文本 rect（绘制与省略判定用）
-	statusZoom   rectI  // 右侧 zoom% 可点 rect（高=状态条整条 ≥24px）
+	statusZoom   rectI  // zoom% 可点 rect
+	statusPin    rectI  // T10：图钉（看图窗锁定最前）可点 rect
 	statusHint   rectI  // 提示文本 rect（窄窗省略）
 	hintVisible  bool
 	hoverZoom    bool // 鼠标悬停 zoom% → 颜色增亮 + 手型
@@ -160,6 +277,10 @@ type imageViewer struct {
 	lastZoomClick time.Time // 双击防抖：两次快速点击只生效一次
 	statusFont   windows.Handle  // 13px 状态条字体（缓存）
 	hintFont     windows.Handle  // 11px 提示字体
+
+	// T7：三态判定的去抖锚点——最近一次「开窗/切图」动作时刻（双击第二下的关闭请求
+	// 距此 < viewerDebounceWindow 时忽略，防止 开→关 闪烁）
+	lastOpenAt time.Time
 }
 
 /** 状态条字体（13px/11px 各一，按 dpi 缓存；WM_DESTROY 时清理） */
@@ -179,22 +300,31 @@ func viewerEnsureFont(px int32) windows.Handle {
 }
 
 /* 状态条布局纯函数（自检可直测）：
-   zoom% 固定右锚 56px 宽；提示文本紧贴其左（DT_RIGHT）；左侧名称优先占位。
+   T10 起右缘三区：pin（图钉 14px，强制最前开关）→ zoom% 56px → hint；名称优先占位。
    空间不足时**先省提示**（任务书：提示可省略，名称/像素/缩放完整可见优先）。 */
-func layoutStatus(clientW, clientH int32, zoomW, hintW float64) (zoom, hint rectI, hintVisible bool) {
+func layoutStatus(clientW, clientH int32, zoomW, pinW, hintW float64) (zoom, pin, hint rectI, hintVisible bool) {
 	statusH := int32(math.Round(viewerStatusH * float64(dpiScale)))
 	top := clientH - statusH
+	if pinW <= 0 {
+		pinW = 14
+	}
 	if zoomW <= 0 {
 		zoomW = 56
 	}
-	zoom = rectI{
-		left:   clientW - 8 - int32(math.Round(zoomW)),
+	pin = rectI{
+		left:   clientW - 8 - int32(math.Round(pinW)),
 		top:    top,
 		right:  clientW - 8,
 		bottom: clientH,
 	}
+	zoom = rectI{
+		left:   pin.left - 12 - int32(math.Round(zoomW)),
+		top:    top,
+		right:  pin.left - 12,
+		bottom: clientH,
+	}
 	if hintW <= 0 {
-		return zoom, rectI{left: 0, top: top, right: zoom.left - 12, bottom: clientH}, false
+		return zoom, pin, rectI{left: 0, top: top, right: zoom.left - 12, bottom: clientH}, false
 	}
 	// 名称至少要放得下 ~220px（含边距），再算提示空间
 	const nameMin = 220
@@ -209,13 +339,33 @@ func layoutStatus(clientW, clientH int32, zoomW, hintW float64) (zoom, hint rect
 	if !hintVisible {
 		hint = rectI{}
 	}
-	return zoom, hint, hintVisible
+	return zoom, pin, hint, hintVisible
 }
 
 /** zoom% 命中判定（第四批任务书 2：可点缩放） */
 func viewerHitsZoom(mx, my int32) bool {
 	r := viewer.statusZoom
 	return mx >= r.left && mx < r.right && my >= r.top && my < r.bottom
+}
+
+/** 图钉命中判定（T10 §8：看图窗锁定最前） */
+func viewerHitsPin(mx, my int32) bool {
+	r := viewer.statusPin
+	return mx >= r.left && mx < r.right && my >= r.top && my < r.bottom
+}
+
+// viewerTopmost：看图窗锁定最前状态（T10 §8——默认 false 不锁；**不持久化**，关窗即复位；
+// 与主窗 alwaysOnTop 完全独立）
+var viewerTopmost bool
+
+// viewerTopToggle：看图窗锁定最前切换（SetWindowPos TOPMOST/NOTOPMOST，
+// 不动几何不抢激活；WM_PAINT 的图钉两态随之重绘）
+func viewerTopToggle() {
+	viewerTopmost = !viewerTopmost
+	if viewer.hwnd != 0 {
+		setTopmostHwnd(viewer.hwnd, viewerTopmost)
+	}
+	pInvalidateRect.Call(uintptr(viewer.hwnd), 0, 0)
 }
 
 var viewer imageViewer
@@ -247,6 +397,28 @@ func openImageViewer(name string) bool {
 		ch2, _, _ := pLoadCursorW.Call(0, IDC_HAND)
 		viewerCursorHand = windows.Handle(ch2)
 	}
+	// T7 三态判定（必须在触碰 viewer 状态之前——旧实现在这里就已改写 name/bgBmp，会吃掉判定前提）：
+	//   同名图 且 看图窗在最前 → 关闭（去抖窗内忽略）；换图或不在最前 → 切图并提层级。
+	//   T7-r2：「在最前」改用 z 序几何判定（viewerOnTopProbe→viewerIsOnTop），不再用前台句柄——
+	//   第二次点击本身会把前台交回主窗，前台判据在真实交互里恒假（关闭分支不可达）。
+	if viewer.hwnd != 0 {
+		if isWin, _, _ := pIsWindow.Call(uintptr(viewer.hwnd)); isWin != 0 {
+			if name == viewer.name && viewerOnTopProbe() {
+				// 同名 + 预览窗已前台 → 关闭预览；双击第二下（<去抖窗）忽略（任务书 §三 边界 1）
+				if time.Since(viewer.lastOpenAt) < viewerDebounceWindow {
+					appLogf("viewer: 去抖窗内忽略关闭请求（距上次开窗动作 %.0fms < %.0fms）",
+						float64(time.Since(viewer.lastOpenAt).Microseconds())/1000.0,
+						float64(viewerDebounceWindow.Microseconds())/1000.0)
+					return true
+				}
+				closeViewerRestoreMain()
+				return true
+			}
+		} else {
+			viewer.hwnd = 0 // 死句柄清理，走下方重建
+		}
+	}
+
 	src := theStore.mediaPath(name)
 	bmp, w, h, err := decodeToOpaqueBGRA(src)
 	if err != nil {
@@ -262,17 +434,17 @@ func openImageViewer(name string) bool {
 		pDeleteObject.Call(uintptr(oldBmp))
 	}
 	if viewer.hwnd != 0 {
-		if isWin, _, _ := pIsWindow.Call(uintptr(viewer.hwnd)); isWin != 0 {
-			// 已开着：换图并重置为适应窗口
-			t, _ := windows.UTF16FromString(viewerTitle())
-			pSetWindowTextW.Call(uintptr(viewer.hwnd), uintptr(unsafe.Pointer(&t[0])))
-			if iconic, _, _ := pIsIconic.Call(uintptr(viewer.hwnd)); iconic != 0 {
-				pShowWindow.Call(uintptr(viewer.hwnd), SW_RESTORE)
-			}
-			viewerResetFit()
-			pInvalidateRect.Call(uintptr(viewer.hwnd), 0, 0)
-			return true
+		// 已开着（换图或此前不在前台）：换图并重置为适应窗口；提层级、不挪位（T7 边界 4）
+		t, _ := windows.UTF16FromString(viewerTitle())
+		pSetWindowTextW.Call(uintptr(viewer.hwnd), uintptr(unsafe.Pointer(&t[0])))
+		if iconic, _, _ := pIsIconic.Call(uintptr(viewer.hwnd)); iconic != 0 {
+			pShowWindow.Call(uintptr(viewer.hwnd), SW_RESTORE)
 		}
+		viewerResetFit()
+		pInvalidateRect.Call(uintptr(viewer.hwnd), 0, 0)
+		viewerActivate(viewer.hwnd)
+		viewer.lastOpenAt = time.Now()
+		return true
 	}
 
 	hInst, _, _ := pGetModuleHandleW.Call(0)
@@ -298,6 +470,10 @@ func openImageViewer(name string) bool {
 	appLogf("viewer: 窗口已创建 hwnd=0x%x bmp=0x%x img=%vx%v", viewer.hwnd, viewer.bgBmp, viewer.imgW, viewer.imgH)
 	// 修复批：窗口创建后即取焦点（滚轮/Esc 依赖焦点；否则消息被 WebView2 接走）
 	pSetFocus.Call(uintptr(viewer.hwnd))
+	// T7 态 4：创建后提层级到前台（任务书 §三——创建 + bringHwndToFront(viewer)）。
+	// 自检态 viewerActivate 为空操作，不影响"不抢前台"的测试红线。
+	viewerActivate(viewer.hwnd)
+	viewer.lastOpenAt = time.Now()
 	// 初始化显式跑一次：WM_SIZE 会重设 client，但初始必须 fit（WM_SIZE 分支按 fitMode 分派，
 	// 初始 fitMode=false 会只走 clamp——所以这里显式把初始档定为「适应窗口」）
 	var cr rectI
@@ -312,6 +488,22 @@ func openImageViewer(name string) bool {
 
 func viewerTitle() string {
 	return "图片查看 · " + viewer.name
+}
+
+// closeViewerRestoreMain：T7 关闭分支——销毁预览窗并把焦点交回主窗。
+// 边界 2：不回流则用户还要再点一次主窗才能继续操作。
+// 边界 3（主窗隐藏/收进托盘 → 预览窗跟随关闭）：本项目**不存在**主动隐藏主窗的路径
+//（托盘菜单仅「显示/还原、取消缩入、退出」；「缩入」是 dock 动画、窗口仍可见）；
+// 唯一让主窗消失的真路径 requestClose() 已挂 viewerDestroyForClosing() 兜底，无孤儿窗口。
+// 「最小化」按窗口语义 ≠ 隐藏（任务栏仍在），故不随最小化关闭——此裁量待终审确认〔推断〕。
+func closeViewerRestoreMain() {
+	if viewer.hwnd != 0 {
+		if alive, _, _ := pIsWindow.Call(uintptr(viewer.hwnd)); alive != 0 {
+			pDestroyWindow.Call(uintptr(viewer.hwnd))
+		}
+	}
+	viewer.hwnd = 0 // WM_DESTROY 已清；防御性再置一次（销毁失败也不残留死句柄）
+	viewerRefocusMain()
 }
 
 /* ---------------------------------------------------------------- 窗口类 */
@@ -554,6 +746,15 @@ func imageViewerWndProc(h windows.Handle, msg uint32, wParam, lParam uintptr) ui
 		viewer.mx = int32(int16(lParam & 0xFFFF))
 		viewer.my = int32(int16((lParam >> 16) & 0xFFFF))
 		viewer.lastX, viewer.lastY = viewer.mx, viewer.my
+		// T10：图钉命中 → 锁定最前切换（先于 zoom 判定——pin 在最右缘；复用 400ms 防抖防双击双切）
+		if viewerHitsPin(viewer.mx, viewer.my) {
+			if time.Since(viewer.lastZoomClick) > 400*time.Millisecond {
+				viewer.lastZoomClick = time.Now()
+				viewerTopToggle()
+				pInvalidateRect.Call(uintptr(h), 0, 0)
+			}
+			return 0
+		}
 		// zoom% 点击 → 切「适应窗口 ↔ 100%」；400ms 防抖防双击双切
 		if viewerHitsZoom(viewer.mx, viewer.my) {
 			if time.Since(viewer.lastZoomClick) > 400*time.Millisecond {
@@ -721,8 +922,9 @@ func viewerPaint(hdc windows.Handle) {
 	}
 	pSelectObject.Call(uintptr(hdc), oldF)
 
-	zoomRect, hintRect, hintVisible := layoutStatus(cr.w(), cr.h(), 56, hintWp)
+	zoomRect, pinRect, hintRect, hintVisible := layoutStatus(cr.w(), cr.h(), 56, 14, hintWp)
 	viewer.statusZoom = zoomRect
+	viewer.statusPin = pinRect
 	viewer.statusHint = hintRect
 	viewer.hintVisible = hintVisible
 
@@ -751,6 +953,35 @@ func viewerPaint(hdc windows.Handle) {
 	rz := viewer.statusZoom
 	pDrawTextW.Call(uintptr(hdc), uintptr(unsafe.Pointer(&zoomText[0])), uintptr(len(zoomText)-1),
 		uintptr(unsafe.Pointer(&rz)), DT_RIGHT|DT_SINGLELINE|DT_VCENTER)
+
+	// 右缘：图钉（T10 §8：看图窗锁定最前开关）
+	viewerPaintPin(hdc, viewer.statusPin)
+}
+
+// viewerPaintPin：图钉两态绘制——锁定=**实心圆钉**（accent 蓝填充）/ 未锁=**空心圆**（底色
+// 填充+暗灰描边）；两态都有针脚线。形态区分靠填充（实心盘 vs 圆环），**不只靠颜色**（色弱可用性）。
+func viewerPaintPin(hdc windows.Handle, r rectI) {
+	cx := (r.left + r.right) / 2
+	cy := r.top + (r.bottom-r.top)/2 - 1
+	rad := int32(4)
+	penColor := uintptr(0x00A29B8E) // 暗灰描边/针脚（未锁）
+	fillColor := uintptr(0x00221B18)
+	if viewerTopmost {
+		penColor = 0x00FEA86E // accent 蓝（锁定）
+		fillColor = 0x00FEA86E
+	}
+	pen, _, _ := pCreatePen.Call(uintptr(0 /*PS_SOLID*/), uintptr(1), penColor)
+	oldPen, _, _ := pSelectObject.Call(uintptr(hdc), pen)
+	var prev pointI
+	pMoveToEx.Call(uintptr(hdc), uintptr(cx), uintptr(cy+rad), uintptr(unsafe.Pointer(&prev)))
+	pLineTo.Call(uintptr(hdc), uintptr(cx-rad-2), uintptr(cy+rad+4))
+	brush, _, _ := pCreateSolidBrush.Call(fillColor)
+	oldBrush, _, _ := pSelectObject.Call(uintptr(hdc), brush)
+	pEllipse.Call(uintptr(hdc), uintptr(cx-rad), uintptr(cy-rad), uintptr(cx+rad), uintptr(cy+rad))
+	pSelectObject.Call(uintptr(hdc), oldBrush)
+	pDeleteObject.Call(brush)
+	pSelectObject.Call(uintptr(hdc), oldPen)
+	pDeleteObject.Call(pen)
 }
 
 /** 主窗关闭时一并销毁看图窗并释放位图（requestClose 里调用） */

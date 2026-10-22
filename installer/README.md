@@ -1,6 +1,6 @@
-# installer/ —— 待办事项优先级提示窗 · 对外安装器（1.0beta）
+# installer/ —— 待办事项优先级提示窗 · 对外安装器（1.1beta）
 
-单文件安装器：内嵌主程序（1.0beta 构建）+ `assets/` 全量 + `uninstall.exe`（go:embed），
+单文件安装器：内嵌主程序（1.1beta 构建）+ `assets/` 全量 + `uninstall.exe`（go:embed），
 安装到 `%LOCALAPPDATA%\Programs\TodoPriorityWidget\`（用户级，免管理员），
 写 HKCU 卸载注册表项、创建开始菜单快捷方式（桌面可选）。
 
@@ -15,14 +15,14 @@ installer/
   payload/              构建期暂存（app.exe / uninstall.exe / assets\），由构建步生成
   build-install.ps1     一键构建安装器（见下）
   makeportable\portable-staging\   便携版 staging（工具生成）
-  dist/                 产物：待办事项优先级提示窗-安装包-1.0beta.exe
-                        待办事项优先级提示窗-便携版-1.0beta.zip
+  dist/                 产物：待办事项优先级提示窗-安装包-1.1beta.exe
+                        待办事项优先级提示窗-便携版-1.1beta.zip
   README.md             本文件
 ```
 
 ## 便携版 zip（T5，纯打包）
 
-- 主程序 = T4 已终审 beta 产物 `app-go\dist\build-beta-out.exe`（字节不变改名，sha256 `4ee9bc1e…`）；
+- 主程序 = T10-β 已终审 beta 产物 `app-go\dist\build-beta-out.exe`（字节不变改名，sha256 `e37b29ec…`）；
   数据目录机制原生支持（exe 同级存在 `data\` 即切换便携模式，`store.go` NewStore + 单测 TestPortableMode）。
 - 构建：`makeportable\makeportable.exe -app <beta exe> -assets app-go\dist\assets -out dist\<zip 名>`
   （或 `go run .\makeportable`）。
@@ -38,7 +38,7 @@ installer/
 3. 复制 `app-go\dist\assets` → `payload\assets\`
 4. go-winres 生成安装器资源（图标+VERSIONINFO）
 5. `go build`（windowsgui）→ `dist\build-installer-out.exe`
-6. 更名 `dist\待办事项优先级提示窗-安装包-1.0beta.exe`
+6. 更名 `dist\待办事项优先级提示窗-安装包-1.1beta.exe`
 
 ## 安装包使用
 

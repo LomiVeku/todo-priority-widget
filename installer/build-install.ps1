@@ -1,4 +1,4 @@
-# build-installer.ps1 -- one-shot build for the public installer (1.0beta)
+# build-installer.ps1 -- one-shot build for the public installer (1.1beta)
 # ASCII only on purpose. Run from the installer/ directory:
 #   powershell -ExecutionPolicy Bypass -File .\build-install.ps1
 $ErrorActionPreference = 'Stop'
@@ -35,8 +35,8 @@ if ($LASTEXITCODE -ne 0) { throw 'assets copy failed' }
 #     remove old syso first so a failed go-winres run cannot silently keep a stale one
 Remove-Item ".\rsrc_windows_amd64.syso" -Force -ErrorAction SilentlyContinue
 go-winres simply --arch amd64 --icon ".\payload\assets\icon.ico" `
-  --product-version 1.0beta --file-version 1.0.0.0 `
-  --product-name "TodoPriorityWidget Installer" --file-description "TodoPriorityWidget 1.0beta installer" `
+  --product-version 1.1beta --file-version 1.0.0.0 `
+  --product-name "TodoPriorityWidget Installer" --file-description "TodoPriorityWidget 1.1beta installer" `
   --manifest gui --out rsrc
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path ".\rsrc_windows_amd64.syso")) { throw 'go-winres failed' }
 
@@ -49,7 +49,7 @@ if ($LASTEXITCODE -ne 0) { throw 'installer build failed' }
 $distDir = Join-Path $root 'dist'
 $staged  = Join-Path $distDir 'build-installer-out.exe'
 if (-not (Test-Path $staged)) { throw 'staged output missing' }
-$publicName = [string]([char]0x5F85+[char]0x529E+[char]0x4E8B+[char]0x9879+[char]0x4F18+[char]0x5148+[char]0x7EA7+[char]0x63D0+[char]0x793A+[char]0x7A97+[char]0x2D+[char]0x5B89+[char]0x88C5+[char]0x5305+[char]0x2D) + '1.0beta.exe'
+$publicName = [string]([char]0x5F85+[char]0x529E+[char]0x4E8B+[char]0x9879+[char]0x4F18+[char]0x5148+[char]0x7EA7+[char]0x63D0+[char]0x793A+[char]0x7A97+[char]0x2D+[char]0x5B89+[char]0x88C5+[char]0x5305+[char]0x2D) + '1.1beta.exe'
 Move-Item -Force $staged (Join-Path $distDir $publicName)
 
 $final = Join-Path $distDir $publicName

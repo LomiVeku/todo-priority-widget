@@ -1,6 +1,6 @@
 //go:build windows
 
-// 卸载器（uninstall.exe）——待办事项优先级提示窗 · 1.0beta 对外版
+// 卸载器（uninstall.exe）——待办事项优先级提示窗 · 1.1beta 对外版
 //
 // 行为（v1）：
 //   1. 检测主程序运行中（窗口类 TodoWidgetGoWnd）→ 提示先退出，不强杀
@@ -208,7 +208,7 @@ func main() {
 		os.Exit(2)
 	}
 	if !silent {
-		if msgBox("确定卸载待办事项优先级提示窗（1.0beta）吗？\n\n注：用户数据（%APPDATA%\\"+appName+"-Go）不会被删除。",
+		if msgBox("确定卸载待办事项优先级提示窗（1.1beta）吗？\n\n注：用户数据（%APPDATA%\\"+appName+"-Go）不会被删除。",
 			mbIconQuestion|mbYesNo) != idYes {
 			os.Exit(0)
 		}

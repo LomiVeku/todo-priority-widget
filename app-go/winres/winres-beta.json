@@ -36,10 +36,10 @@
         "info": {
           "0409": {
             "FileDescription": "待办事项优先级提示窗（Go 版）",
-            "FileVersion": "1.0.0.0",
+            "FileVersion": "1.1beta",
             "OriginalFilename": "待办事项优先级提示窗.exe",
             "ProductName": "待办事项优先级提示窗",
-            "ProductVersion": "1.0beta"
+            "ProductVersion": "1.1beta"
           }
         }
       }

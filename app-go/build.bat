@@ -25,7 +25,7 @@ echo [1/4] go version
 go version
 if errorlevel 1 goto :fail
 
-echo [2/4] generate resources (icon + VERSIONINFO 1.3.0)
+echo [2/4] generate resources (icon + VERSIONINFO 1.4.0)
 rem 先清掉另一构建通道可能残留的 syso，避免资源串版
 if exist rsrc_windows_amd64.syso del /q rsrc_windows_amd64.syso
 go-winres make --in winres\winres-internal.json --out winres\out-internal --arch amd64
@@ -35,7 +35,7 @@ if errorlevel 1 goto :fail
 
 echo [3/4] go build（-s -w 去符号表，-H windowsgui 无控制台窗口）
 if not exist dist mkdir dist
-go build -trimpath -ldflags "-s -w -H windowsgui" -o "dist\待办事项优先级提示窗-Go.exe" .
+go build -trimpath -buildvcs=false -ldflags "-s -w -H windowsgui" -o "dist\待办事项优先级提示窗-Go.exe" .
 if errorlevel 1 goto :fail
 
 echo [4/4] sync assets to dist\assets (stale-frontend guard)
