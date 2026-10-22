@@ -35,6 +35,9 @@ ai-bridge/
 # 教训：本仓库**禁止** git add -A / git commit -a，一律显式点名文件。
 AGENTS.md
 docs/
+# 工具链（内部协作工具 relay / 门禁脚本 / 环境脚本）
+# 2026-10-22：13 个文件已 git rm --cached 退出公开仓库，本地保留；此后再改不会被误推
+toolchain/
 # 项目根的三份内部档案（协作规则 / 版本登记 / 测试 SOP）
 测试流程SOP与填坑备忘录.md
 版本登记-内部.md
